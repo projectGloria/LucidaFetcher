@@ -1,0 +1,142 @@
+{"ts":"2026-08-31T09:46:32.769Z","t":42,"evt":"session.start","logFile":"C:\\Users\\Nihil\\Desktop\\projectGloria\\LucidaFetcher\\logs\\session-2026-08-31T09-46-32.jsonl","downloadPath":"D:\\Songz","stateDir":"C:\\Users\\Nihil\\Desktop\\projectGloria\\LucidaFetcher\\state","speedLimitKBps":0,"scanFolderForExisting":false,"manifestEntries":5,"electron":"44.0.0","chrome":"152.0.7977.54","node":"24.18.1","platform":"win32","arch":"x64"}
+{"ts":"2026-08-31T09:46:32.996Z","t":269,"evt":"session.config","source":"default","FALLBACK_SERVICES":["amazon"],"MIN_TITLE_SCORE":0.6,"MAX_START_ATTEMPTS":3,"startTimeoutMs":120000,"cascadePolls":60,"emptyPollsBeforeNoResults":16}
+{"ts":"2026-08-31T09:46:32.997Z","t":270,"evt":"session.config","source":"config","FALLBACK_SERVICES":["amazon"],"MIN_TITLE_SCORE":0.6,"MAX_START_ATTEMPTS":3,"startTimeoutMs":120000,"cascadePolls":60,"emptyPollsBeforeNoResults":16}
+{"ts":"2026-08-31T09:46:32.998Z","t":271,"evt":"console.warn","msg":"%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://electronjs.org/docs/tutorial/security.\nThis warning will not show up\nonce the app is packaged."}
+{"ts":"2026-08-31T09:46:35.857Z","t":3130,"evt":"search.start","query":"c'mon","kind":"text"}
+{"ts":"2026-08-31T09:46:39.344Z","t":6617,"evt":"search.result","kind":"scrape","tracks":60,"url":"https://lucida.to/search?query=c%27mon&service=qobuz&country=US"}
+{"ts":"2026-08-31T09:46:42.849Z","t":10122,"evt":"search.start","query":"c'mon 5star","kind":"text"}
+{"ts":"2026-08-31T09:46:44.347Z","t":11620,"evt":"search.result","kind":"scrape","tracks":0,"url":"https://lucida.to/search?query=c%27mon%205star&service=qobuz&country=US"}
+{"ts":"2026-08-31T09:46:45.568Z","t":12841,"evt":"search.start","query":"c'mon 5star","kind":"text"}
+{"ts":"2026-08-31T09:46:48.026Z","t":15299,"evt":"search.start","query":"c'mon 5star","kind":"text"}
+{"ts":"2026-08-31T09:46:48.346Z","t":15619,"evt":"search.result","kind":"scrape","tracks":30,"url":"https://lucida.to/search?query=c%27mon%205star&service=qobuz&country=US"}
+{"ts":"2026-08-31T09:46:49.346Z","t":16619,"evt":"search.result","kind":"scrape","tracks":30,"url":"https://lucida.to/search?query=c%27mon%205star&service=qobuz&country=US"}
+{"ts":"2026-08-31T09:47:07.405Z","t":34678,"evt":"search.start","query":"come on 5star5Star Ft. Lay Bankz - Cmonnn (Hit It One Time)","kind":"text"}
+{"ts":"2026-08-31T09:47:09.350Z","t":36623,"evt":"search.result","kind":"scrape","tracks":0,"url":"https://lucida.to/search?query=come%20on%205star5Star%20Ft.%20Lay%20Bankz%20-%20Cmonnn%20(Hit%20It%20One%20Time)&service=qobuz&country=US"}
+{"ts":"2026-08-31T09:47:10.337Z","t":37610,"evt":"search.start","query":"come on 5star5Star Ft. Lay Bankz - Cmonnn (Hit It One Time)","kind":"text"}
+{"ts":"2026-08-31T09:47:12.350Z","t":39623,"evt":"search.result","kind":"scrape","tracks":30,"url":"https://lucida.to/search?query=come%20on%205star5Star%20Ft.%20Lay%20Bankz%20-%20Cmonnn%20(Hit%20It%20One%20Time)&service=qobuz&country=US"}
+{"ts":"2026-08-31T09:47:19.109Z","t":46382,"evt":"queue.add","id":"item-0","name":"Cmonnn (Hit It One Time) - 5Star","title":"Cmonnn (Hit It One Time)","artist":"5Star","searchQuery":"Cmonnn Hit It One Time 5Star","url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F149636071"}
+{"ts":"2026-08-31T09:47:19.124Z","t":46397,"evt":"attempt.start","id":"item-0","name":"Cmonnn (Hit It One Time) - 5Star","service":"qobuz","fallbackIndex":-1,"attempt":1,"url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F149636071","queueDepth":0}
+{"ts":"2026-08-31T09:48:16.345Z","t":103618,"evt":"attempt.outcome","id":"item-0","name":"Cmonnn (Hit It One Time) - 5Star","service":"qobuz","outcome":"timeout","label":null,"considered":0,"ms":57221,"url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F149636071"}
+{"ts":"2026-08-31T09:48:16.346Z","t":103619,"evt":"retry","id":"item-0","name":"Cmonnn (Hit It One Time) - 5Star","service":"qobuz","why":"No download control found","attempt":1,"max":3}
+{"ts":"2026-08-31T09:48:16.346Z","t":103619,"evt":"console.warn","msg":"[retry] Cmonnn (Hit It One Time) - 5Star | qobuz | No download control found 1/3"}
+{"ts":"2026-08-31T09:48:19.353Z","t":106626,"evt":"attempt.start","id":"item-0","name":"Cmonnn (Hit It One Time) - 5Star","service":"qobuz","fallbackIndex":-1,"attempt":2,"url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F149636071","queueDepth":0}
+{"ts":"2026-08-31T09:48:20.376Z","t":107649,"evt":"attempt.outcome","id":"item-0","name":"Cmonnn (Hit It One Time) - 5Star","service":"qobuz","outcome":"clicked-download-button","label":null,"considered":0,"ms":1024,"url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F149636071"}
+{"ts":"2026-08-31T09:48:24.939Z","t":112212,"evt":"download.start","file":"5Star - Cmonnn (Hit It One Time).flac","total":19580984,"savePath":"D:\\Songz\\5Star - Cmonnn (Hit It One Time).flac","itemId":"item-0","originalService":"qobuz","attemptedService":"qobuz","url":"https://katze.lucida.to/api/fetch/request/430d43c8-f296-45f1-8e06-905f1afa7f8e/download","mime":"audio/flac"}
+{"ts":"2026-08-31T09:48:24.940Z","t":112213,"evt":"download.progress","file":"5Star - Cmonnn (Hit It One Time).flac","received":0,"total":19580984,"ms":1}
+{"ts":"2026-08-31T09:48:24.940Z","t":112213,"evt":"download.mapped","id":"item-0","name":"Cmonnn (Hit It One Time) - 5Star","file":"5Star - Cmonnn (Hit It One Time).flac","total":19580984,"service":"qobuz","msToStart":5588}
+{"ts":"2026-08-31T09:48:28.627Z","t":115900,"evt":"download.done","file":"5Star - Cmonnn (Hit It One Time).flac","state":"completed","bytes":19580984,"total":19580984,"ms":3688,"kbps":5185,"itemId":"item-0","originalService":"qobuz","attemptedService":"qobuz"}
+{"ts":"2026-08-31T09:48:28.631Z","t":115904,"evt":"report.write","folder":null,"section":"downloaded","title":"Cmonnn (Hit It One Time)","downloaded":5,"missing":0}
+{"ts":"2026-08-31T09:48:28.632Z","t":115905,"evt":"item.done","id":"item-0","name":"Cmonnn (Hit It One Time) - 5Star","file":"5Star - Cmonnn (Hit It One Time).flac","status":"completed","service":"qobuz","fallbackIndex":-1,"attempts":1,"msTotal":9279}
+{"ts":"2026-08-31T09:53:36.152Z","t":423425,"evt":"queue.pause","depth":0}
+{"ts":"2026-08-31T09:53:36.153Z","t":423426,"evt":"download.pause","inFlight":0}
+{"ts":"2026-08-31T09:53:37.005Z","t":424278,"evt":"queue.resume","depth":0}
+{"ts":"2026-08-31T09:53:37.005Z","t":424278,"evt":"download.resume","inFlight":0}
+{"ts":"2026-08-31T09:54:13.894Z","t":461167,"evt":"queue.remove","count":1,"reason":"row","live":false,"depth":0}
+{"ts":"2026-08-31T09:54:22.599Z","t":469872,"evt":"search.start","query":"blood in the cut","kind":"text"}
+{"ts":"2026-08-31T09:54:22.604Z","t":469877,"evt":"cache.hit","key":"text:blood in the cut","ageMs":5491246,"entries":60}
+{"ts":"2026-08-31T09:54:22.605Z","t":469878,"evt":"search.result","kind":"text","tracks":60,"cached":true,"ms":5}
+{"ts":"2026-08-31T09:54:26.024Z","t":473297,"evt":"queue.add","id":"item-1","name":"Blood In The Cut (Aire Atlantica Remix) - Aire Atlantica","title":"Blood In The Cut (Aire Atlantica Remix)","artist":"Aire Atlantica","searchQuery":"Blood In The Cut Aire Atlantica Remix Aire Atlantica","url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F38978206"}
+{"ts":"2026-08-31T09:54:26.041Z","t":473314,"evt":"attempt.start","id":"item-1","name":"Blood In The Cut (Aire Atlantica Remix) - Aire Atlantica","service":"qobuz","fallbackIndex":-1,"attempt":1,"url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F38978206","queueDepth":0}
+{"ts":"2026-08-31T09:55:13.066Z","t":520339,"evt":"search.start","query":"freestyler","kind":"text"}
+{"ts":"2026-08-31T09:55:15.350Z","t":522623,"evt":"search.result","kind":"scrape","tracks":60,"url":"https://lucida.to/search?query=freestyler&service=qobuz&country=US"}
+{"ts":"2026-08-31T09:55:27.355Z","t":534628,"evt":"attempt.outcome","id":"item-1","name":"Blood In The Cut (Aire Atlantica Remix) - Aire Atlantica","service":"qobuz","outcome":"timeout","label":null,"considered":0,"ms":61314,"url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F38978206"}
+{"ts":"2026-08-31T09:55:27.356Z","t":534629,"evt":"retry","id":"item-1","name":"Blood In The Cut (Aire Atlantica Remix) - Aire Atlantica","service":"qobuz","why":"No download control found","attempt":1,"max":3}
+{"ts":"2026-08-31T09:55:27.356Z","t":534629,"evt":"console.warn","msg":"[retry] Blood In The Cut (Aire Atlantica Remix) - Aire Atlantica | qobuz | No download control found 1/3"}
+{"ts":"2026-08-31T09:55:29.356Z","t":536629,"evt":"attempt.start","id":"item-1","name":"Blood In The Cut (Aire Atlantica Remix) - Aire Atlantica","service":"qobuz","fallbackIndex":-1,"attempt":2,"url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F38978206","queueDepth":0}
+{"ts":"2026-08-31T09:55:30.927Z","t":538200,"evt":"search.start","query":"freestyler bomfunk","kind":"text"}
+{"ts":"2026-08-31T09:55:30.982Z","t":538255,"evt":"attempt.outcome","id":"item-1","name":"Blood In The Cut (Aire Atlantica Remix) - Aire Atlantica","service":"qobuz","outcome":"clicked-download-button","label":null,"considered":0,"ms":1626,"url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F38978206"}
+{"ts":"2026-08-31T09:55:34.347Z","t":541620,"evt":"search.result","kind":"scrape","tracks":24,"url":"https://lucida.to/search?query=freestyler%20bomfunk&service=qobuz&country=US"}
+{"ts":"2026-08-31T09:55:39.051Z","t":546324,"evt":"download.start","file":"Aire Atlantica - Blood In The Cut (Aire Atlantica Remix).flac","total":25546382,"savePath":"D:\\Songz\\Aire Atlantica - Blood In The Cut (Aire Atlantica Remix).flac","itemId":"item-1","originalService":"qobuz","attemptedService":"qobuz","url":"https://hund.lucida.to/api/fetch/request/9788e418-9588-466b-9f42-2f3492dc0f0a/download","mime":"audio/flac"}
+{"ts":"2026-08-31T09:55:39.052Z","t":546325,"evt":"download.progress","file":"Aire Atlantica - Blood In The Cut (Aire Atlantica Remix).flac","received":0,"total":25546382,"ms":1}
+{"ts":"2026-08-31T09:55:39.052Z","t":546325,"evt":"download.mapped","id":"item-1","name":"Blood In The Cut (Aire Atlantica Remix) - Aire Atlantica","file":"Aire Atlantica - Blood In The Cut (Aire Atlantica Remix).flac","total":25546382,"service":"qobuz","msToStart":9696}
+{"ts":"2026-08-31T09:55:43.995Z","t":551268,"evt":"download.done","file":"Aire Atlantica - Blood In The Cut (Aire Atlantica Remix).flac","state":"completed","bytes":25546382,"total":25546382,"ms":4944,"kbps":5046,"itemId":"item-1","originalService":"qobuz","attemptedService":"qobuz"}
+{"ts":"2026-08-31T09:55:43.997Z","t":551270,"evt":"report.write","folder":null,"section":"downloaded","title":"Blood In The Cut (Aire Atlantica Remix)","downloaded":5,"missing":0}
+{"ts":"2026-08-31T09:55:43.998Z","t":551271,"evt":"item.done","id":"item-1","name":"Blood In The Cut (Aire Atlantica Remix) - Aire Atlantica","file":"Aire Atlantica - Blood In The Cut (Aire Atlantica Remix).flac","status":"completed","service":"qobuz","fallbackIndex":-1,"attempts":1,"msTotal":14642}
+{"ts":"2026-08-31T09:55:48.220Z","t":555493,"evt":"queue.add","id":"item-2","name":"Freestyler - Bomfunk MC's","title":"Freestyler","artist":"Bomfunk MC's","searchQuery":"Freestyler Bomfunk MC's","url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F391469"}
+{"ts":"2026-08-31T09:55:48.223Z","t":555496,"evt":"attempt.start","id":"item-2","name":"Freestyler - Bomfunk MC's","service":"qobuz","fallbackIndex":-1,"attempt":1,"url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F391469","queueDepth":0}
+{"ts":"2026-08-31T09:56:02.558Z","t":569831,"evt":"search.start","query":"pump it","kind":"text"}
+{"ts":"2026-08-31T09:56:05.357Z","t":572630,"evt":"search.result","kind":"scrape","tracks":60,"url":"https://lucida.to/search?query=pump%20it&service=qobuz&country=US"}
+{"ts":"2026-08-31T09:56:10.150Z","t":577423,"evt":"queue.add","id":"item-3","name":"Pump It (Album Version) - The Black Eyed Peas","title":"Pump It (Album Version)","artist":"The Black Eyed Peas","searchQuery":"Pump It Album Version The Black Eyed Peas","url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F13697351"}
+{"ts":"2026-08-31T09:56:35.120Z","t":602393,"evt":"search.start","query":"lets get it started","kind":"text"}
+{"ts":"2026-08-31T09:56:39.202Z","t":606475,"evt":"attempt.outcome","id":"item-2","name":"Freestyler - Bomfunk MC's","service":"qobuz","outcome":"timeout","label":null,"considered":0,"ms":50978,"url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F391469"}
+{"ts":"2026-08-31T09:56:39.202Z","t":606475,"evt":"retry","id":"item-2","name":"Freestyler - Bomfunk MC's","service":"qobuz","why":"No download control found","attempt":1,"max":3}
+{"ts":"2026-08-31T09:56:39.202Z","t":606475,"evt":"console.warn","msg":"[retry] Freestyler - Bomfunk MC's | qobuz | No download control found 1/3"}
+{"ts":"2026-08-31T09:56:39.348Z","t":606621,"evt":"search.result","kind":"scrape","tracks":60,"url":"https://lucida.to/search?query=lets%20get%20it%20started&service=qobuz&country=US"}
+{"ts":"2026-08-31T09:56:41.209Z","t":608482,"evt":"attempt.start","id":"item-2","name":"Freestyler - Bomfunk MC's","service":"qobuz","fallbackIndex":-1,"attempt":2,"url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F391469","queueDepth":1}
+{"ts":"2026-08-31T09:56:42.665Z","t":609938,"evt":"attempt.outcome","id":"item-2","name":"Freestyler - Bomfunk MC's","service":"qobuz","outcome":"clicked-download-button","label":null,"considered":0,"ms":1456,"url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F391469"}
+{"ts":"2026-08-31T09:56:54.152Z","t":621425,"evt":"search.start","query":"lets get it started black eyes peas","kind":"text"}
+{"ts":"2026-08-31T09:56:57.347Z","t":624620,"evt":"search.result","kind":"scrape","tracks":34,"url":"https://lucida.to/search?query=lets%20get%20it%20started%20black%20eyes%20peas&service=qobuz&country=US"}
+{"ts":"2026-08-31T09:57:29.039Z","t":656312,"evt":"search.start","query":"https://open.spotify.com/track/50w5mfnGoJMFQwlf3yq98v","kind":"spotify"}
+{"ts":"2026-08-31T09:57:29.369Z","t":656642,"evt":"search.error","kind":"spotify","message":"No tracks found on that Spotify link."}
+{"ts":"2026-08-31T09:57:32.573Z","t":659846,"evt":"search.start","query":"https://open.spotify.com/track/50w5mfnGoJMFQwlf3yq98v","kind":"spotify"}
+{"ts":"2026-08-31T09:57:33.123Z","t":660396,"evt":"search.error","kind":"spotify","message":"No tracks found on that Spotify link."}
+{"ts":"2026-08-31T09:57:33.646Z","t":660919,"evt":"search.start","query":"https://open.spotify.com/track/50w5mfnGoJMFQwlf3yq98v","kind":"spotify"}
+{"ts":"2026-08-31T09:57:33.744Z","t":661017,"evt":"search.error","kind":"spotify","message":"No tracks found on that Spotify link."}
+{"ts":"2026-08-31T09:57:34.192Z","t":661465,"evt":"search.start","query":"https://open.spotify.com/track/50w5mfnGoJMFQwlf3yq98v","kind":"spotify"}
+{"ts":"2026-08-31T09:57:34.331Z","t":661604,"evt":"search.error","kind":"spotify","message":"No tracks found on that Spotify link."}
+{"ts":"2026-08-31T09:57:34.696Z","t":661969,"evt":"search.start","query":"https://open.spotify.com/track/50w5mfnGoJMFQwlf3yq98v","kind":"spotify"}
+{"ts":"2026-08-31T09:57:34.963Z","t":662236,"evt":"search.error","kind":"spotify","message":"No tracks found on that Spotify link."}
+{"ts":"2026-08-31T09:57:35.237Z","t":662510,"evt":"search.start","query":"https://open.spotify.com/track/50w5mfnGoJMFQwlf3yq98v","kind":"spotify"}
+{"ts":"2026-08-31T09:57:35.360Z","t":662633,"evt":"search.error","kind":"spotify","message":"No tracks found on that Spotify link."}
+{"ts":"2026-08-31T09:57:35.609Z","t":662882,"evt":"search.start","query":"https://open.spotify.com/track/50w5mfnGoJMFQwlf3yq98v","kind":"spotify"}
+{"ts":"2026-08-31T09:57:35.966Z","t":663239,"evt":"search.error","kind":"spotify","message":"No tracks found on that Spotify link."}
+{"ts":"2026-08-31T09:57:36.226Z","t":663499,"evt":"search.start","query":"https://open.spotify.com/track/50w5mfnGoJMFQwlf3yq98v","kind":"spotify"}
+{"ts":"2026-08-31T09:57:36.459Z","t":663732,"evt":"search.error","kind":"spotify","message":"No tracks found on that Spotify link."}
+{"ts":"2026-08-31T09:57:36.710Z","t":663983,"evt":"search.start","query":"https://open.spotify.com/track/50w5mfnGoJMFQwlf3yq98v","kind":"spotify"}
+{"ts":"2026-08-31T09:57:37.152Z","t":664425,"evt":"search.start","query":"https://open.spotify.com/track/50w5mfnGoJMFQwlf3yq98v","kind":"spotify"}
+{"ts":"2026-08-31T09:57:37.328Z","t":664601,"evt":"search.start","query":"https://open.spotify.com/track/50w5mfnGoJMFQwlf3yq98v","kind":"spotify"}
+{"ts":"2026-08-31T09:57:37.486Z","t":664759,"evt":"search.error","kind":"spotify","message":"No tracks found on that Spotify link."}
+{"ts":"2026-08-31T09:57:37.725Z","t":664998,"evt":"search.error","kind":"spotify","message":"No tracks found on that Spotify link."}
+{"ts":"2026-08-31T09:57:37.793Z","t":665066,"evt":"search.start","query":"https://open.spotify.com/track/50w5mfnGoJMFQwlf3yq98v","kind":"spotify"}
+{"ts":"2026-08-31T09:57:37.862Z","t":665135,"evt":"search.error","kind":"spotify","message":"No tracks found on that Spotify link."}
+{"ts":"2026-08-31T09:57:37.978Z","t":665251,"evt":"search.start","query":"https://open.spotify.com/track/50w5mfnGoJMFQwlf3yq98v","kind":"spotify"}
+{"ts":"2026-08-31T09:57:38.023Z","t":665296,"evt":"search.error","kind":"spotify","message":"No tracks found on that Spotify link."}
+{"ts":"2026-08-31T09:57:38.145Z","t":665418,"evt":"search.start","query":"https://open.spotify.com/track/50w5mfnGoJMFQwlf3yq98v","kind":"spotify"}
+{"ts":"2026-08-31T09:57:38.159Z","t":665432,"evt":"search.error","kind":"spotify","message":"No tracks found on that Spotify link."}
+{"ts":"2026-08-31T09:57:38.306Z","t":665579,"evt":"search.error","kind":"spotify","message":"No tracks found on that Spotify link."}
+{"ts":"2026-08-31T09:57:38.315Z","t":665588,"evt":"search.start","query":"https://open.spotify.com/track/50w5mfnGoJMFQwlf3yq98v","kind":"spotify"}
+{"ts":"2026-08-31T09:57:38.431Z","t":665704,"evt":"search.error","kind":"spotify","message":"No tracks found on that Spotify link."}
+{"ts":"2026-08-31T09:57:38.463Z","t":665736,"evt":"search.start","query":"https://open.spotify.com/track/50w5mfnGoJMFQwlf3yq98v","kind":"spotify"}
+{"ts":"2026-08-31T09:57:41.611Z","t":668884,"evt":"profile.start","service":"spotify","user":"thesimulacrum"}
+{"ts":"2026-08-31T09:57:41.614Z","t":668887,"evt":"cache.hit","key":"profile:spotify:thesimulacrum","ageMs":5636258,"entries":130}
+{"ts":"2026-08-31T09:57:41.614Z","t":668887,"evt":"profile.result","service":"spotify","user":"thesimulacrum","playlists":130,"cached":true,"ms":4}
+{"ts":"2026-08-31T09:57:43.547Z","t":670820,"evt":"search.error","kind":"spotify","message":"Failed to extract tracks from Spotify link."}
+{"ts":"2026-08-31T09:57:51.475Z","t":678748,"evt":"search.start","query":"black eyed peas lets get it started","kind":"text"}
+{"ts":"2026-08-31T09:57:54.349Z","t":681622,"evt":"search.result","kind":"scrape","tracks":34,"url":"https://lucida.to/search?query=black%20eyed%20peas%20lets%20get%20it%20started&service=qobuz&country=US"}
+{"ts":"2026-08-31T09:58:00.754Z","t":688027,"evt":"queue.add","id":"item-4","name":"Let's Get It Started - The Black Eyed Peas","title":"Let's Get It Started","artist":"The Black Eyed Peas","searchQuery":"Let's Get It Started The Black Eyed Peas","url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F101057420"}
+{"ts":"2026-08-31T09:58:41.214Z","t":728487,"evt":"retry","id":"item-2","name":"Freestyler - Bomfunk MC's","service":"qobuz","why":"Timed out","attempt":2,"max":3}
+{"ts":"2026-08-31T09:58:41.215Z","t":728488,"evt":"console.warn","msg":"[retry] Freestyler - Bomfunk MC's | qobuz | Timed out 2/3"}
+{"ts":"2026-08-31T09:58:43.217Z","t":730490,"evt":"attempt.start","id":"item-2","name":"Freestyler - Bomfunk MC's","service":"qobuz","fallbackIndex":-1,"attempt":3,"url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F391469","queueDepth":2}
+{"ts":"2026-08-31T09:58:44.419Z","t":731692,"evt":"attempt.outcome","id":"item-2","name":"Freestyler - Bomfunk MC's","service":"qobuz","outcome":"clicked-download-button","label":null,"considered":0,"ms":1203,"url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F391469"}
+{"ts":"2026-08-31T09:58:58.630Z","t":745903,"evt":"download.start","file":"Bomfunk MC's - Freestyler.flac","total":39518906,"savePath":"D:\\Songz\\Bomfunk MC's - Freestyler.flac","itemId":"item-2","originalService":"qobuz","attemptedService":"qobuz","url":"https://katze.lucida.to/api/fetch/request/ac32b561-0d05-46a8-8f44-1700f5160245/download","mime":"audio/flac"}
+{"ts":"2026-08-31T09:58:58.631Z","t":745904,"evt":"download.progress","file":"Bomfunk MC's - Freestyler.flac","received":0,"total":39518906,"ms":1}
+{"ts":"2026-08-31T09:58:58.631Z","t":745904,"evt":"download.mapped","id":"item-2","name":"Freestyler - Bomfunk MC's","file":"Bomfunk MC's - Freestyler.flac","total":39518906,"service":"qobuz","msToStart":15414}
+{"ts":"2026-08-31T09:59:08.784Z","t":756057,"evt":"download.progress","file":"Bomfunk MC's - Freestyler.flac","received":17410202,"total":39518906,"ms":10154}
+{"ts":"2026-08-31T09:59:18.942Z","t":766215,"evt":"download.progress","file":"Bomfunk MC's - Freestyler.flac","received":35191976,"total":39518906,"ms":20312}
+{"ts":"2026-08-31T09:59:22.695Z","t":769969,"evt":"download.done","file":"Bomfunk MC's - Freestyler.flac","state":"completed","bytes":39518906,"total":39518906,"ms":24065,"kbps":1604,"itemId":"item-2","originalService":"qobuz","attemptedService":"qobuz"}
+{"ts":"2026-08-31T09:59:22.697Z","t":769970,"evt":"report.write","folder":null,"section":"downloaded","title":"Freestyler","downloaded":5,"missing":0}
+{"ts":"2026-08-31T09:59:22.699Z","t":769972,"evt":"item.done","id":"item-2","name":"Freestyler - Bomfunk MC's","file":"Bomfunk MC's - Freestyler.flac","status":"completed","service":"qobuz","fallbackIndex":-1,"attempts":2,"msTotal":39482}
+{"ts":"2026-08-31T09:59:24.351Z","t":771624,"evt":"attempt.start","id":"item-3","name":"Pump It (Album Version) - The Black Eyed Peas","service":"qobuz","fallbackIndex":-1,"attempt":1,"url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F13697351","queueDepth":1}
+{"ts":"2026-08-31T09:59:28.432Z","t":775705,"evt":"attempt.outcome","id":"item-3","name":"Pump It (Album Version) - The Black Eyed Peas","service":"qobuz","outcome":"clicked-download-button","label":null,"considered":0,"ms":4082,"url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F13697351"}
+{"ts":"2026-08-31T09:59:50.348Z","t":797621,"evt":"download.start","file":"The Black Eyed Peas - Pump It (Album Version).flac","total":30679844,"savePath":"D:\\Songz\\The Black Eyed Peas - Pump It (Album Version).flac","itemId":"item-3","originalService":"qobuz","attemptedService":"qobuz","url":"https://katze.lucida.to/api/fetch/request/eb529728-cc09-47bc-b7e9-c73ff6f09ea7/download","mime":"audio/flac"}
+{"ts":"2026-08-31T09:59:50.349Z","t":797622,"evt":"download.mapped","id":"item-3","name":"Pump It (Album Version) - The Black Eyed Peas","file":"The Black Eyed Peas - Pump It (Album Version).flac","total":30679844,"service":"qobuz","msToStart":25999}
+{"ts":"2026-08-31T09:59:50.349Z","t":797622,"evt":"download.progress","file":"The Black Eyed Peas - Pump It (Album Version).flac","received":0,"total":30679844,"ms":1}
+{"ts":"2026-08-31T10:00:00.532Z","t":807805,"evt":"download.progress","file":"The Black Eyed Peas - Pump It (Album Version).flac","received":29551737,"total":30679844,"ms":10184}
+{"ts":"2026-08-31T10:00:01.264Z","t":808537,"evt":"download.done","file":"The Black Eyed Peas - Pump It (Album Version).flac","state":"completed","bytes":30679844,"total":30679844,"ms":10916,"kbps":2745,"itemId":"item-3","originalService":"qobuz","attemptedService":"qobuz"}
+{"ts":"2026-08-31T10:00:01.266Z","t":808539,"evt":"report.write","folder":null,"section":"downloaded","title":"Pump It (Album Version)","downloaded":5,"missing":0}
+{"ts":"2026-08-31T10:00:01.267Z","t":808540,"evt":"item.done","id":"item-3","name":"Pump It (Album Version) - The Black Eyed Peas","file":"The Black Eyed Peas - Pump It (Album Version).flac","status":"completed","service":"qobuz","fallbackIndex":-1,"attempts":0,"msTotal":36917}
+{"ts":"2026-08-31T10:00:02.354Z","t":809627,"evt":"attempt.start","id":"item-4","name":"Let's Get It Started - The Black Eyed Peas","service":"qobuz","fallbackIndex":-1,"attempt":1,"url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F101057420","queueDepth":0}
+{"ts":"2026-08-31T10:01:17.352Z","t":884625,"evt":"attempt.outcome","id":"item-4","name":"Let's Get It Started - The Black Eyed Peas","service":"qobuz","outcome":"timeout","label":null,"considered":0,"ms":74998,"url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F101057420"}
+{"ts":"2026-08-31T10:01:17.352Z","t":884625,"evt":"retry","id":"item-4","name":"Let's Get It Started - The Black Eyed Peas","service":"qobuz","why":"No download control found","attempt":1,"max":3}
+{"ts":"2026-08-31T10:01:17.352Z","t":884625,"evt":"console.warn","msg":"[retry] Let's Get It Started - The Black Eyed Peas | qobuz | No download control found 1/3"}
+{"ts":"2026-08-31T10:01:20.354Z","t":887627,"evt":"attempt.start","id":"item-4","name":"Let's Get It Started - The Black Eyed Peas","service":"qobuz","fallbackIndex":-1,"attempt":2,"url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F101057420","queueDepth":0}
+{"ts":"2026-08-31T10:01:21.196Z","t":888469,"evt":"attempt.outcome","id":"item-4","name":"Let's Get It Started - The Black Eyed Peas","service":"qobuz","outcome":"clicked-download-button","label":null,"considered":0,"ms":842,"url":"https://lucida.to/?url=https%3A%2F%2Fplay.qobuz.com%2Ftrack%2F101057420"}
+{"ts":"2026-08-31T10:01:27.917Z","t":895190,"evt":"download.start","file":"The Black Eyed Peas - Let's Get It Started.flac","total":30106581,"savePath":"D:\\Songz\\The Black Eyed Peas - Let's Get It Started.flac","itemId":"item-4","originalService":"qobuz","attemptedService":"qobuz","url":"https://hund.lucida.to/api/fetch/request/4bd159c5-68a2-44b8-b3f1-e1ede23df88f/download","mime":"audio/flac"}
+{"ts":"2026-08-31T10:01:27.917Z","t":895190,"evt":"download.mapped","id":"item-4","name":"Let's Get It Started - The Black Eyed Peas","file":"The Black Eyed Peas - Let's Get It Started.flac","total":30106581,"service":"qobuz","msToStart":7563}
+{"ts":"2026-08-31T10:01:27.918Z","t":895191,"evt":"download.progress","file":"The Black Eyed Peas - Let's Get It Started.flac","received":0,"total":30106581,"ms":1}
+{"ts":"2026-08-31T10:01:33.580Z","t":900853,"evt":"download.done","file":"The Black Eyed Peas - Let's Get It Started.flac","state":"completed","bytes":30106581,"total":30106581,"ms":5663,"kbps":5192,"itemId":"item-4","originalService":"qobuz","attemptedService":"qobuz"}
+{"ts":"2026-08-31T10:01:33.582Z","t":900855,"evt":"report.write","folder":null,"section":"downloaded","title":"Let's Get It Started","downloaded":5,"missing":0}
+{"ts":"2026-08-31T10:01:33.583Z","t":900856,"evt":"item.done","id":"item-4","name":"Let's Get It Started - The Black Eyed Peas","file":"The Black Eyed Peas - Let's Get It Started.flac","status":"completed","service":"qobuz","fallbackIndex":-1,"attempts":1,"msTotal":13229}
+{"ts":"2026-08-31T10:11:11.480Z","t":1478753,"evt":"download.cancel","cancelled":0}
+{"ts":"2026-08-31T10:11:11.482Z","t":1478755,"evt":"queue.remove.all","count":4}
+{"ts":"2026-08-31T10:11:12.187Z","t":1479460,"evt":"session.end","uptimeMs":1479460}

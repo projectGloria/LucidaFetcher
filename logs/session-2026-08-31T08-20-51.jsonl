@@ -1,0 +1,13 @@
+{"ts":"2026-08-31T08:20:51.152Z","t":38,"evt":"session.start","logFile":"C:\\Users\\Nihil\\Desktop\\projectGloria\\LucidaFetcher\\logs\\session-2026-08-31T08-20-51.jsonl","downloadPath":"D:\\Songz","stateDir":"C:\\Users\\Nihil\\Desktop\\projectGloria\\LucidaFetcher\\state","speedLimitKBps":0,"scanFolderForExisting":false,"manifestEntries":54,"electron":"44.0.0","chrome":"152.0.7977.54","node":"24.18.1","platform":"win32","arch":"x64"}
+{"ts":"2026-08-31T08:20:51.384Z","t":270,"evt":"session.config","source":"default","FALLBACK_SERVICES":["amazon"],"MIN_TITLE_SCORE":0.6,"MAX_START_ATTEMPTS":3,"startTimeoutMs":120000,"cascadePolls":60,"emptyPollsBeforeNoResults":16}
+{"ts":"2026-08-31T08:20:51.423Z","t":309,"evt":"console.warn","msg":"%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://electronjs.org/docs/tutorial/security.\nThis warning will not show up\nonce the app is packaged."}
+{"ts":"2026-08-31T08:20:51.424Z","t":310,"evt":"error.rejection","message":"Cannot set properties of null (setting 'value')"}
+{"ts":"2026-08-31T08:21:00.013Z","t":8899,"evt":"profile.start","service":"spotify","user":"thesimulacrum"}
+{"ts":"2026-08-31T08:21:15.009Z","t":23895,"evt":"search.start","query":"kflay","kind":"text"}
+{"ts":"2026-08-31T08:21:45.352Z","t":54238,"evt":"search.result","kind":"scrape","tracks":0,"url":"https://lucida.to/search?query=kflay&service=qobuz&country=US"}
+{"ts":"2026-08-31T08:21:53.214Z","t":62100,"evt":"search.start","query":"k.flay","kind":"text"}
+{"ts":"2026-08-31T08:21:53.215Z","t":62101,"evt":"cache.hit","key":"text:k.flay","ageMs":2233870,"entries":60}
+{"ts":"2026-08-31T08:21:53.216Z","t":62102,"evt":"search.result","kind":"text","tracks":60,"cached":true,"ms":3}
+{"ts":"2026-08-31T08:21:59.767Z","t":68653,"evt":"search.start","query":"k.flay blood in the cut","kind":"text"}
+{"ts":"2026-08-31T08:22:17.245Z","t":86131,"evt":"search.start","query":"blood in the cut","kind":"text"}
+{"ts":"2026-08-31T08:22:38.146Z","t":107032,"evt":"session.end","uptimeMs":107032}
