@@ -1476,6 +1476,20 @@
             margin-bottom: 1rem;
             border-left: 1px solid var(--border);
         }
+        @media (max-width: 768px) {
+            .app { grid-template-columns: 1fr; }
+            .sidebar { position: absolute; z-index: 100; transform: translateX(-100%); width: var(--sidebar-width); height: 100%; }
+            .sidebar.open { transform: translateX(0); }
+            .content { padding: 1rem; }
+            .topbar { padding: 1rem; }
+            .hero-search { flex-direction: column; }
+            .scope-dropdown { width: 100%; }
+            .scope-trigger { border-radius: 16px 16px 0 0; width: 100%; border-bottom: 1px solid var(--border); height: 50px; justify-content: center; }
+            .search-divider { display: none; }
+            .search-field { width: 100%; }
+            .search-field input { border-radius: 0 0 16px 16px; height: 50px; }
+            #mobile-menu-toggle { display: block !important; }
+        }
     </style>
 </head>
 <body>
@@ -1527,12 +1541,29 @@
                 </button>
             </div>
 
+            <div class="nav-section" id="saved-profiles-section" style="display:none;">
+                <div class="nav-label">Saved Profiles</div>
+                <div id="saved-profiles-list"></div>
+            </div>
+
             <div class="sidebar-footer">
-                <div class="user-card">
+                <div id="current-download-indicator" style="display: none; padding: 10px; background: var(--surface); border-radius: 8px; border: 1px solid var(--border); margin-bottom: 10px; overflow: hidden;">
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <img id="cd-art" src="" style="width: 40px; height: 40px; border-radius: 4px; object-fit: cover;">
+                        <div style="min-width: 0; flex: 1;">
+                            <div id="cd-title" style="font-size: 0.8rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"></div>
+                            <div id="cd-artist" style="font-size: 0.7rem; color: var(--text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"></div>
+                        </div>
+                    </div>
+                    <div style="height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; margin-top: 8px; overflow: hidden;">
+                        <div id="cd-progress" style="height: 100%; width: 0%; background: var(--accent);"></div>
+                    </div>
+                </div>
+                <div class="user-card" data-tab="profile">
                     <div class="avatar">U</div>
                     <div class="user-info">
-                        <strong>User</strong>
-                        <span>Local session</span>
+                        <strong>User Mode</strong>
+                        <span>Click to search profiles</span>
                     </div>
                 </div>
             </div>
@@ -1541,6 +1572,11 @@
         <!-- Main -->
         <main class="main">
             <div class="topbar">
+                <button id="mobile-menu-toggle" class="btn" style="display:none; margin-right:10px; background: transparent; border: none; padding: 0;"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg></button>
+                <div class="nav-buttons" style="display: flex; gap: 5px; margin-right: 15px;">
+                    <button id="btn-back" class="btn" style="background:transparent; border:none; padding: 5px; cursor: pointer; color: var(--text-secondary);"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"></polyline></svg></button>
+                    <button id="btn-forward" class="btn" style="background:transparent; border:none; padding: 5px; cursor: pointer; color: var(--text-secondary);"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg></button>
+                </div>
                 <h1 class="page-title" id="pageTitle">Search</h1>
                 <div class="topbar-spacer"></div>
                 <div class="status-dot" title="Connected"></div>
@@ -1666,18 +1702,18 @@
                                 <div class="setting-hint">Where your music files will be saved.</div>
                             </div>
                             <div class="setting-control">
-                                <input type="text" class="text-input" value="/home/user/Music">
-                                <button class="btn">Browse</button>
+                                <input type="text" id="download-path-display" class="text-input" value="/home/user/Music" readonly>
+                                <button id="browse-btn" class="btn">Browse</button>
                             </div>
                         </div>
 
                         <div class="setting-row">
                             <div class="setting-info">
                                 <div class="setting-label">Speed limit</div>
-                                <div class="setting-hint">Set to 0 for unlimited bandwidth.</div>
+                                <div class="setting-hint" id="speed-note">Set to 0 for unlimited bandwidth.</div>
                             </div>
                             <div class="setting-control">
-                                <input type="number" class="number-input" value="0">
+                                <input type="number" id="speed-limit" class="number-input" value="0">
                                 <span class="unit">KB/s</span>
                             </div>
                         </div>
@@ -1685,10 +1721,10 @@
                         <div class="setting-row">
                             <div class="setting-info">
                                 <div class="setting-label">Fallback services</div>
-                                <div class="setting-hint">Re-searched in order when a track is not on the store it came from.</div>
+                                <div class="setting-hint" id="service-note">Re-searched in order when a track is not on the store it came from.</div>
                             </div>
-                            <div class="setting-control">
-                                <button class="btn">Configure</button>
+                            <div class="setting-control" id="service-list">
+                                <!-- Service checkboxes populated via JS -->
                             </div>
                         </div>
                     </div>
@@ -1703,7 +1739,7 @@
                                     Test services
                                 </div>
                             </div>
-                            <button class="btn btn-primary">
+                            <button id="test-services-btn" class="btn btn-primary">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
                                 Run test
                             </button>
@@ -1728,7 +1764,7 @@
                                     Skip existing tracks
                                 </div>
                             </div>
-                            <div class="toggle active"></div>
+                            <div class="toggle active"><input type="checkbox" id="scan-existing" style="width:100%;height:100%;opacity:0;cursor:pointer;position:absolute;top:0;left:0;"></div>
                         </div>
                         <div class="setting-row" style="border-bottom: none; padding: 0;">
                             <div class="setting-info">
@@ -1747,9 +1783,9 @@
                                     </div>
                                     Cached metadata
                                 </div>
-                                <p class="section-desc">Search results and playlist track lists, kept for 7 days.</p>
+                                <p class="section-desc" id="cache-note">Search results and playlist track lists, kept for 7 days.</p>
                             </div>
-                            <button class="btn btn-danger">Clear cache</button>
+                            <button id="clear-cache-btn" class="btn btn-danger">Clear cache</button>
                         </div>
                     </div>
 
@@ -1762,7 +1798,7 @@
                                     </div>
                                     Session log
                                 </div>
-                                <p class="section-desc">One JSON object per line.</p>
+                                <p class="section-desc">One JSON object per line. <input type="text" id="log-path-display" class="text-input" style="width:100%; margin-top:5px;" readonly></p>
                             </div>
                         </div>
                         <div class="log">
@@ -1931,5 +1967,6 @@
     <webview id="scraper-view" style="position:absolute; z-index:-1; opacity:0.001; pointer-events:none;"></webview>
     <webview id="download-view" style="position:absolute; z-index:-1; opacity:0.001; pointer-events:none;"></webview>
     <script src="renderer.js" defer></script>
+    <script src="extra-features.js" defer></script>
 </body>
 </html>

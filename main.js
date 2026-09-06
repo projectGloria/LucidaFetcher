@@ -4,6 +4,9 @@ const fs = require('fs');
 
 const crypto = require('crypto');
 
+// Suppress internal Chromium network/STUN stderr spam
+app.commandLine.appendSwitch('log-level', '3');
+
 let downloadPath = app.getPath('downloads'); // replaced by state/config.json at startup
 let mainWindow = null;
 
@@ -119,6 +122,7 @@ function debounced(fn, ms) {
 }
 
 const saveManifest = debounced(() => writeJson(MANIFEST_FILE, manifest), 500);
+ipcMain.handle('manifest-get', () => manifest);
 const saveQueue = debounced((snap) => writeJson(QUEUE_FILE, snap), 400);
 
 function loadState() {
@@ -160,6 +164,10 @@ ipcMain.on('queue-clear', () => {
   saveQueue.cancel(); // otherwise the in-flight debounce writes the file straight back
   try { fs.unlinkSync(QUEUE_FILE); } catch (e) { /* nothing to clear */ }
 });
+
+const PROFILES_FILE = path.join(STATE_DIR, 'profiles.json');
+ipcMain.handle('profiles-get', () => readJson(PROFILES_FILE, []));
+ipcMain.on('profiles-save', (event, profiles) => writeJson(PROFILES_FILE, profiles));
 
 // ---------------------------------------------------------------------------
 // Scrape cache
@@ -222,6 +230,43 @@ ipcMain.handle('http-json', async (event, url) => {
   try { return JSON.parse(text); } catch (e) { throw new Error('bad json from ' + u.hostname); }
 });
 
+const yt = require('./youtube-dl.js');
+ipcMain.handle('yt-metadata', async (event, url) => {
+  return await yt.fetchMetadata(url);
+});
+ipcMain.handle('yt-download', async (event, payload) => {
+  const { url, savePath, itemId, key, folderName, title, artist, group } = payload || {};
+  let source;
+  try { source = new URL(String(url)); } catch (e) { throw new Error('Invalid media URL.'); }
+  if (!/^https?:$/.test(source.protocol)) throw new Error('Only HTTP(S) media URLs are supported.');
+
+  const root = path.resolve(downloadPath);
+  const target = path.resolve(String(savePath || ''));
+  if (target !== root && !target.startsWith(root + path.sep)) {
+    throw new Error('Download path is outside the configured download folder.');
+  }
+  await fs.promises.mkdir(path.dirname(target), { recursive: true });
+  await yt.downloadYoutubeLink(source.href, target, (progress) => {
+    toUI('yt-download-progress', { itemId, progress });
+  });
+  const bytes = (await fs.promises.stat(target)).size;
+  const manifestKey = key || itemId;
+  if (manifestKey) {
+    manifest[manifestKey] = { file: path.basename(target), savePath: target, bytes,
+      at: new Date().toISOString(), service: 'youtube', format: path.extname(target).slice(1), sourceUrl: source.href };
+  }
+  saveManifest();
+  if (title) {
+    writeReport(folderName, 'downloaded', {
+      title, artist: artist || '', group: group || null, service: 'youtube',
+      sourceUrl: source.href, file: path.basename(target), bytes, via: 'yt-dlp'
+    });
+    await flushReports();
+    reportCache.delete(path.join(folderFor(folderName), REPORT_NAME));
+  }
+  return { ok: true, savePath: target, file: path.basename(target), bytes };
+});
+
 // ---------------------------------------------------------------------------
 // "Is this track already downloaded?"
 //
@@ -235,13 +280,22 @@ ipcMain.handle('http-json', async (event, url) => {
 const AUDIO_EXT = /\.(flac|mp3|m4a|ogg|opus|wav|aac|alac)$/i;
 
 function normTokens(s) {
+  const fold = { 'ł':'l','ø':'o','đ':'d','ð':'d','þ':'th','æ':'ae','œ':'oe',
+    'ß':'ss','ı':'i','ħ':'h','ŋ':'n','ŧ':'t','ĸ':'k' };
   return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
+    .replace(/[^\p{L}\p{N}]+/gu, (c) => fold[c] || ' ')
+    .trim().split(/\s+/).filter(Boolean);
 }
 
 // must match the sanitisation applied when a download is actually saved, below
 function folderFor(folderName) {
-  return folderName ? path.join(downloadPath, folderName.replace(/[<>:"/\\|?*]+/g, '_')) : downloadPath;
+  if (!folderName) return path.resolve(downloadPath);
+  let safe = String(folderName).replace(/[<>:"/\\|?*]+/g, '_').replace(/[. ]+$/g, '').trim();
+  if (!safe || safe === '.' || safe === '..') safe = '_';
+  const root = path.resolve(downloadPath);
+  const candidate = path.resolve(root, safe);
+  if (candidate !== root && !candidate.startsWith(root + path.sep)) return path.join(root, '_');
+  return candidate;
 }
 
 function checkDownloaded(q, names = null) {
@@ -726,7 +780,12 @@ function handleWillDownload(event, item, webContents) {
       // perspective for now - drop the cache entry rather than holding it for
       // the app's lifetime. writeReport/writeReport-again re-reads from disk
       // on a cache miss, so this is safe.
-      reportCache.delete(path.join(folderFor(ctx.folderName), REPORT_NAME));
+      if (ctx) {
+        // writeReport is debounced; flush before eviction so the completed entry
+        // cannot disappear with its cache record.
+        await flushReports();
+        reportCache.delete(path.join(folderFor(ctx.folderName), REPORT_NAME));
+      }
     }
 
     // Durable writes above happen before this UI send (defense in depth: a

@@ -314,10 +314,23 @@ function freshGroupIds(results, prefix) {
   return results;
 }
 
-async function performSearch() {
+let searchHistory = [];
+let historyIndex = -1;
+
+async function performSearch(isHistoryAction = false) {
   if (!searchInput) return;
   const query = searchInput.value.trim();
   if (!query) return;
+
+  if (!isHistoryAction) {
+    if (historyIndex >= 0 && searchHistory[historyIndex] === query) {
+      // noop
+    } else {
+      searchHistory = searchHistory.slice(0, historyIndex + 1);
+      searchHistory.push(query);
+      historyIndex++;
+    }
+  }
 
   resultsList.innerHTML = '';
   statusText.innerText = 'Loading...';
@@ -377,6 +390,35 @@ async function performSearch() {
     return;
   }
 
+  const isYouTube = /(youtube\.com|youtu\.be)/i.test(query);
+  const isSoundCloud = /soundcloud\.com/i.test(query);
+  if (isYouTube || isSoundCloud) {
+    isCurrentSearchALink = true;
+    statusText.innerText = 'Extracting track metadata via yt-dlp...';
+    try {
+      const meta = await ipcRenderer.invoke('yt-metadata', query);
+      const title = meta.title || 'Unknown Title';
+      const artist = meta.artist || 'Unknown Artist';
+      
+      const item = {
+        link: query,
+        image: meta.thumbnail,
+        texts: [title, artist],
+        ytFallbackUrl: query // Marks this item to fallback to yt-dlp
+      };
+      
+      const service = serviceSelect ? serviceSelect.value : 'qobuz';
+      item.link = `https://lucida.to/search?query=${encodeURIComponent(title + ' ' + artist)}&service=${service}&country=US`;
+      
+      ipcRenderer.send('cache-set', { key: cacheKey, value: [item] });
+      renderResults([item]);
+      statusText.innerText = `Found 1 result via ${isYouTube ? 'YouTube' : 'SoundCloud'}.`;
+    } catch (err) {
+      statusText.innerText = 'Could not extract metadata: ' + err.message;
+    }
+    return;
+  }
+
   scraperMode = 'lucida';
   pendingScrapeKey = cacheKey; // what the scraper's dom-ready handler caches under
   if (query.startsWith('http')) {
@@ -393,6 +435,30 @@ async function performSearch() {
 
 searchInput?.addEventListener('keypress', (e) => {
   if (e.key === 'Enter') performSearch();
+});
+
+document.getElementById('btn-back')?.addEventListener('click', () => {
+  if (historyIndex > 0) {
+    historyIndex--;
+    searchInput.value = searchHistory[historyIndex];
+    performSearch(true);
+  }
+});
+
+document.getElementById('btn-forward')?.addEventListener('click', () => {
+  if (historyIndex < searchHistory.length - 1) {
+    historyIndex++;
+    searchInput.value = searchHistory[historyIndex];
+    performSearch(true);
+  }
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    if (document.activeElement !== searchInput && (window.innerHeight + window.scrollY >= document.body.offsetHeight - 50)) {
+      searchInput.focus();
+    }
+  }
 });
 
 scraperView.addEventListener('dom-ready', async () => {
@@ -425,7 +491,8 @@ scraperView.addEventListener('dom-ready', async () => {
             const link = linkEl.href;
             
             const imgWrapper = imgEl ? imgEl.closest('a') : null;
-            const image = imgWrapper && imgWrapper.href ? imgWrapper.href : (imgEl ? imgEl.src : '');
+            let image = imgWrapper && imgWrapper.href ? imgWrapper.href : (imgEl ? imgEl.src : '');
+            if (image) image = image.replace(/(\\?|&)w=\\d+/g, '').replace(/(\\?|&)h=\\d+/g, '');
 
             return {
               link: link,
@@ -453,7 +520,8 @@ scraperView.addEventListener('dom-ready', async () => {
           
           const imgEl = document.querySelector('img.cover-right') || document.querySelector('img');
           const imgWrapper = imgEl ? imgEl.closest('a') : null;
-          const image = imgWrapper && imgWrapper.href ? imgWrapper.href : (imgEl ? imgEl.src : '');
+          let image = imgWrapper && imgWrapper.href ? imgWrapper.href : (imgEl ? imgEl.src : '');
+          if (image) image = image.replace(/(\\?|&)w=\\d+/g, '').replace(/(\\?|&)h=\\d+/g, '');
           
           const results = trackElements.map(trackDiv => {
              const p = trackDiv.querySelector('p');
@@ -1155,7 +1223,11 @@ async function spotifyPlaylistTracks(url, opts) {
     const trackList = entity?.trackList || [];
     if (!trackList.length) return { error: 'No tracks found on that Spotify link.' };
 
-    const defaultCover = o.cover || entity?.coverArt?.sources?.[0]?.url || '';
+    const sources = entity?.coverArt?.sources;
+    let defaultCover = o.cover || '';
+    if (!defaultCover && sources && sources.length) {
+      defaultCover = sources.reduce((a, b) => (a.width || 0) > (b.width || 0) ? a : b).url;
+    }
     const playlistName = o.playlistName || entity?.name || 'Spotify Playlist';
     const groupId = 'spotify-' + Date.now();
 
@@ -1170,7 +1242,12 @@ async function spotifyPlaylistTracks(url, opts) {
           const m = h.match(/<script id="__NEXT_DATA__".*?>([^<]+)<\/script>/);
           if (m) {
             const d = JSON.parse(m[1]);
-            return d.props?.pageProps?.state?.data?.entity?.visualIdentity?.image?.[0]?.url || defaultCover;
+            const imgs = d.props?.pageProps?.state?.data?.entity?.visualIdentity?.image;
+            if (imgs && imgs.length) {
+              const best = imgs.reduce((a, b) => (a.width || 0) > (b.width || 0) ? a : b);
+              return best.url || defaultCover;
+            }
+            return defaultCover;
           }
         } catch (e) { /* fall back to the playlist cover */ }
         return defaultCover;
@@ -1364,26 +1441,50 @@ function renderPlaylists(playlists, parsed) {
   resultsList.className = 'results-grid';
   resultsList.innerHTML = '';
 
+  const headerContainer = document.createElement('div');
+  headerContainer.className = 'bulk-download-btn';
+  headerContainer.style.display = 'flex';
+  headerContainer.style.gap = '10px';
+  headerContainer.style.marginBottom = '15px';
+
   const allBtn = document.createElement('button');
-  allBtn.className = 'bulk-download-btn';
+  allBtn.className = 'btn';
   allBtn.innerText = 'Download All ' + playlists.length + ' Playlists';
-  allBtn.style.marginBottom = '15px';
   allBtn.style.padding = '10px 20px';
   allBtn.style.background = '#28a745';
+  allBtn.style.color = '#fff';
   allBtn.style.fontWeight = 'bold';
   allBtn.onclick = () => queueAllPlaylists(playlists, allBtn, parsed);
-  resultsList.appendChild(allBtn);
+  headerContainer.appendChild(allBtn);
+
+  if (parsed && parsed.user) {
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'btn';
+    saveBtn.innerText = 'Save Profile';
+    saveBtn.style.padding = '10px 20px';
+    saveBtn.onclick = async () => {
+      const p = (await ipcRenderer.invoke('profiles-get')) || [];
+      const url = parsed.service === 'deezer' ? `deezer.com/profile/${parsed.user}` : `open.spotify.com/user/${parsed.user}`;
+      if (!p.some((item) => item.user && item.user.toLowerCase() === parsed.user.toLowerCase() && item.service === parsed.service)) {
+        p.push({ user: parsed.user, service: parsed.service, url });
+        ipcRenderer.send('profiles-save', p);
+        if (typeof renderSavedProfiles === 'function') renderSavedProfiles();
+      }
+      saveBtn.innerText = 'Saved!';
+      saveBtn.disabled = true;
+    };
+    headerContainer.appendChild(saveBtn);
+  }
+
+  resultsList.appendChild(headerContainer);
 
   const rows = document.createDocumentFragment();
   playlists.forEach((pl) => {
     const row = document.createElement('div');
     row.className = 'result-item';
 
-    const img = document.createElement('img');
-    img.loading = 'lazy';
-    img.decoding = 'async';
-    img.src = pl.image || '';
-    row.appendChild(img);
+    const thumb = createArtworkThumb(pl.image, pl.name);
+    row.appendChild(thumb);
 
     const info = document.createElement('div');
     info.className = 'result-info';
@@ -1413,6 +1514,7 @@ function renderPlaylists(playlists, parsed) {
 
     rows.appendChild(row);
   });
+
   resultsList.appendChild(rows);
 }
 
@@ -2006,15 +2108,15 @@ function tryFallbackOrAbandon(item, reason, detail = null) {
   const from = serviceOf(item);
   recordTried(item, from, detail ? `${reason} (best hit: ${detail})` : reason);
 
-  // Walk forward past any store this track has already been through. The first
-  // attempt uses whatever service the incoming link carried - usually qobuz - so
-  // without this an enabled qobuz entry would re-search the store that just
-  // failed, and every skipped track would pay for it.
   const already = item.triedServices || (item.tried || []).map((t) => t.service);
   const service = FALLBACK_SERVICES.find((sv) => already.indexOf(sv) === -1 && !(serviceHealth[sv] && serviceHealth[sv].status === 'unavailable'));
 
   if (!item.searchQuery || !service) {
-    abandonItem(item, reason, detail);
+    if (item.ytFallbackUrl) {
+      triggerYTDlpFallback(item, reason, detail);
+    } else {
+      abandonItem(item, reason, detail);
+    }
     return;
   }
 
@@ -2043,6 +2145,42 @@ function tryFallbackOrAbandon(item, reason, detail = null) {
   if (currentProcessingItem && currentProcessingItem.id === item.id) currentProcessingItem = null;
   persistSoon();
   setTimeout(processNextInQueue, 1000);
+}
+
+async function triggerYTDlpFallback(item, reason, detail) {
+  clearTimeout(downloadTimeout);
+  if (clearStartListener) { clearStartListener(); clearStartListener = null; }
+  
+  const textEl = document.getElementById('dl-text-' + item.id);
+  if (textEl) textEl.innerText = `Downloading via yt-dlp fallback...`;
+  updateCoverOverlay(item.id, 'downloading');
+  
+  try {
+    const ext = '.m4a';
+    const folder = item.folderName || '';
+    const safeName = item.name.replace(/[<>:"/\\|?*]+/g, '_');
+    const savePath = await ipcRenderer.invoke('get-download-path'); // get base path
+    const fullPath = folder ? savePath + '\\' + folder + '\\' + safeName + ext : savePath + '\\' + safeName + ext;
+    
+    await ipcRenderer.invoke('yt-download', { url: item.ytFallbackUrl, savePath: fullPath, itemId: item.id });
+    
+    recordTried(item, 'yt-dlp', 'Direct download');
+    
+    // Simulate the download-status event that a normal download would fire
+    downloadFileMap['yt-fallback-' + item.id] = item.id;
+    activeDownloads[item.id] = activeDownloads[item.id] || { item };
+    
+    // Dispatch it to myself so the UI updates
+    const ev = new Event('download-status');
+    ipcRenderer.emit('download-status', ev, { 
+      file: 'yt-fallback-' + item.id, 
+      status: 'completed', 
+      service: 'youtube', 
+      savePath: fullPath 
+    });
+  } catch (e) {
+    abandonItem(item, 'yt-dlp fallback failed: ' + e.message, null);
+  }
 }
 
 function abandonItem(item, reason, detail = null) {
@@ -2405,7 +2543,6 @@ ipcRenderer.on('download-started', (event, { file, total, service, itemId, saveP
     if (itemId && itemId !== currentProcessingItem.id) return;
     currentProcessingItem.attemptService = normalizeService(service) || currentProcessingItem.attemptService;
     downloadFileMap[file] = currentProcessingItem.id;
-    activeDownloads[currentProcessingItem.id].status = 'downloading';
     activeDownloads[currentProcessingItem.id].savePath = savePath || null;
     activeDownloads[currentProcessingItem.id].mappedFilename = file;
     
@@ -2416,6 +2553,16 @@ ipcRenderer.on('download-started', (event, { file, total, service, itemId, saveP
     const textEl = document.getElementById('dl-text-' + currentProcessingItem.id);
     if (textEl) textEl.innerText = 'Starting download from ' + serviceLabel(currentProcessingItem.attemptService) + '...';
     updateCoverOverlay(currentProcessingItem.id, 'downloading');
+    
+    // UI Indicator for sidebar
+    const ind = document.getElementById('current-download-indicator');
+    if (ind) {
+      ind.style.display = 'block';
+      document.getElementById('cd-art').src = currentProcessingItem.image || currentProcessingItem.groupArtwork || '';
+      document.getElementById('cd-title').innerText = currentProcessingItem.name;
+      document.getElementById('cd-artist').innerText = (currentProcessingItem.texts || [])[1] || '';
+      document.getElementById('cd-progress').style.width = '0%';
+    }
     
     updateBadge();
   }
@@ -2444,17 +2591,28 @@ function renderDownloadProgress(file, received, total) {
   const source = rec && rec.item ? serviceLabel(rec.item.attemptService || rec.item.originalService) : null;
 
   if (rec) rec.bytes = received;
+  
+  let pct = 0;
+  if (total) pct = Math.round((received / total) * 100);
 
   if (fillEl && textEl) {
     const speedStr = downloadSpeeds[id].speedStr;
     const downloadedMB = (received / 1024 / 1024).toFixed(2) + ' MB';
     if (total) {
-      const pct = Math.round((received / total) * 100);
       const totalMB = (total / 1024 / 1024).toFixed(2) + ' MB';
       fillEl.style.width = pct + '%';
       textEl.innerText = `${pct}% • ${speedStr} • ${downloadedMB} / ${totalMB}` + (source ? ` • ${source}` : '');
     } else {
       textEl.innerText = `Downloading • ${speedStr} • ${downloadedMB}` + (source ? ` • ${source}` : '');
+    }
+  }
+  
+  // Update sidebar if this is the active download
+  const ind = document.getElementById('current-download-indicator');
+  if (ind && ind.style.display === 'block') {
+    const titleEl = document.getElementById('cd-title');
+    if (titleEl && rec && rec.item && titleEl.innerText === rec.item.name) {
+       document.getElementById('cd-progress').style.width = pct + '%';
     }
   }
 }
@@ -2492,6 +2650,16 @@ ipcRenderer.on('download-status', (event, { file, status, service, savePath }) =
     activeDownloads[id].savePath = savePath || activeDownloads[id].savePath || null;
     persistedDownloadIds.delete(id);
     updateBadge();
+
+    // Hide sidebar indicator if it matches
+    const ind = document.getElementById('current-download-indicator');
+    if (ind && ind.style.display === 'block') {
+      const titleEl = document.getElementById('cd-title');
+      if (titleEl && titleEl.innerText === queueItem.name) {
+        setTimeout(() => { ind.style.display = 'none'; }, 2000);
+      }
+    }
+    
     if (fillEl && textEl) {
       fillEl.style.width = '100%';
       fillEl.style.background = '#28a745';

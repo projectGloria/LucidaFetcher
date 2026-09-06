@@ -13,5 +13,8 @@
   "type": "commonjs",
   "devDependencies": {
     "electron": "^44.0.0"
+  },
+  "dependencies": {
+    "youtube-dl-exec": "^3.1.13"
   }
 }
