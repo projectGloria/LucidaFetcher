@@ -1490,6 +1490,30 @@
             .search-field input { border-radius: 0 0 16px 16px; height: 50px; }
             #mobile-menu-toggle { display: block !important; }
         }
+        /* Backdrop shown while #scraper-view is promoted to a visible panel to
+           let the user answer a Cloudflare challenge. */
+        #challenge-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            z-index: 1000;
+            background: rgba(0, 0, 0, 0.72);
+        }
+        #challenge-overlay.visible { display: block; }
+        #challenge-note {
+            position: absolute;
+            left: 50%;
+            top: 24px;
+            transform: translateX(-50%);
+            width: min(560px, 92vw);
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            text-align: center;
+            color: #fff;
+        }
+        #challenge-note strong { font-size: 15px; }
+        #challenge-note span { font-size: 13px; opacity: 0.8; }
     </style>
 </head>
 <body>
@@ -1964,8 +1988,17 @@
     <div id="artwork-context-menu" class="artwork-context-menu hidden">
         <div class="artwork-context-menu-item">Save artwork</div>
     </div>
+    <div id="challenge-overlay">
+        <div id="challenge-note">
+            <strong>Cloudflare check</strong>
+            <span>lucida.to is asking to verify the browser. Complete the check below and the search continues on its own.</span>
+        </div>
+    </div>
     <webview id="scraper-view" style="position:absolute; z-index:-1; opacity:0.001; pointer-events:none;"></webview>
     <webview id="download-view" style="position:absolute; z-index:-1; opacity:0.001; pointer-events:none;"></webview>
+    <!-- One worker webview per concurrent download, created by the engine.
+         Two tracks sharing a page would interleave their scrapes. -->
+    <div id="worker-views" style="position:absolute; z-index:-1; width:0; height:0; overflow:hidden;"></div>
     <script src="renderer.js" defer></script>
     <script src="extra-features.js" defer></script>
 </body>

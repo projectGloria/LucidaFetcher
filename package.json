@@ -1,20 +1,67 @@
 {
   "name": "lucidafetcher",
   "version": "1.0.0",
-  "description": "",
+  "description": "Fetches audio for a pasted playlist or track link.",
   "main": "main.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "electron ."
+    "test": "node --test test/*.test.mjs",
+    "start": "electron .",
+    "dev:ui": "vite",
+    "build:ui": "vite build",
+    "preview:ui": "vite preview",
+    "dist:win": "npm run icons && npm run build:ui && electron-builder --win",
+    "pack": "npm run icons && npm run build:ui && electron-builder --dir",
+    "icons": "node scripts/make-icon.mjs"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "devDependencies": {
-    "electron": "^44.0.0"
+    "@vitejs/plugin-react": "^6.1.1",
+    "electron": "^44.0.0",
+    "electron-builder": "^26.15.3",
+    "simple-icons": "^16.30.0",
+    "vite": "^8.2.2"
   },
   "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "youtube-dl-exec": "^3.1.13"
+  },
+  "build": {
+    "appId": "com.projectgloria.lucidafetcher",
+    "productName": "LucidaFetcher",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "youtube-dl.js",
+      "dist/**/*",
+      "build/icon.png",
+      "build/tray.png",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "**/node_modules/youtube-dl-exec/bin/**",
+      "**/node_modules/@ffmpeg-installer/**"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "${productName}-${version}-Setup.${ext}",
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "LucidaFetcher"
+    }
   }
 }

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lucida Fetcher</title>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <!-- Scraper and worker webviews live outside the React tree.
+         React must never own these: re-rendering a <webview> remounts it, which
+         destroys the page mid-scrape and cancels any download in flight. -->
+    <div id="scraper-host" class="offscreen-host">
+      <webview id="scraper-view"></webview>
+    </div>
+    <div id="worker-views" class="offscreen-host"></div>
+
+    <script type="module" src="./main.jsx"></script>
+  </body>
+</html>

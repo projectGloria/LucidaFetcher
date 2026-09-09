@@ -1,0 +1,52 @@
+[
+  {
+    "id": "soundcloud",
+    "url": "https://developers.soundcloud.com/assets/logo_white-2a8d0b9755fd7c4fc52d020a331d838a75abd779a4ca4898931f3fc2cd20ad97.png",
+    "ext": "png"
+  },
+  {
+    "id": "qobuz",
+    "url": "https://static.qobuz.com/images/favicon/favicon-96x96.png",
+    "ext": "png"
+  },
+  {
+    "id": "amazon",
+    "url": "https://m.media-amazon.com/images/G/01/music/logo/1.0/smile_256x256.png",
+    "ext": "png"
+  },
+  {
+    "id": "yandex",
+    "url": "https://music.yandex.com/favicon-48x48.png",
+    "ext": "png"
+  },
+  {
+    "id": "monochrome",
+    "url": "https://monochrome.tf/assets/monochrome_logo-CZupkp5H.svg",
+    "ext": "svg"
+  },
+  {
+    "id": "spotify",
+    "url": "https://open.spotifycdn.com/cdn/images/favicon32.b64ecc03.png",
+    "ext": "png"
+  },
+  {
+    "id": "youtube",
+    "url": "https://www.youtube.com/s/desktop/bfff41d2/img/favicon_96x96.png",
+    "ext": "png"
+  },
+  {
+    "id": "deezer",
+    "url": "https://cdn-files.dzcdn.net/cache/images/common/favicon/favicon-72x72.52f8186cd0543de61a12.png",
+    "ext": "png"
+  },
+  {
+    "id": "napster",
+    "url": "https://cdn.prod.website-files.com/69ae6251111a514c4038172a/69b162fe58ef2659030d9f17_favicon.png",
+    "ext": "png"
+  },
+  {
+    "id": "tidal",
+    "url": "https://listen.tidal.com/favicon.ico",
+    "ext": "ico"
+  }
+]

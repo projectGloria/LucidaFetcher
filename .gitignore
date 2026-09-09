@@ -1,0 +1,19 @@
+node_modules/
+
+# Runtime state: the queue, the download manifest and the scrape cache are all
+# machine-local and rewritten constantly.
+state/
+logs/
+
+# Build output
+dist/
+out/
+
+# Downloaded music and per-folder reports
+KAN/
+
+.DS_Store
+Thumbs.db
+
+# electron-builder output
+release/

@@ -69,7 +69,12 @@ const SERVICE_DEFINITIONS = {
   soundcloud: { label: 'SoundCloud', icon: 'assets/services/soundcloud.svg', lucidaSlug: 'soundcloud' },
   amazon: { label: 'Amazon Music', icon: 'assets/services/amazon-music.svg', lucidaSlug: 'amazon' },
   yandex: { label: 'Yandex Music', icon: 'assets/services/yandex.svg', lucidaSlug: 'yandex' },
-  spotify: { label: 'Spotify', icon: 'assets/services/spotify.svg', lucidaSlug: null }
+  spotify: { label: 'Spotify', icon: 'assets/services/spotify.svg', lucidaSlug: null },
+  // Not a Lucida backend at all - a separate site with its own catalogue, tried
+  // only once every Lucida store has been. Deliberately absent from ALL_SERVICES
+  // so it never appears in the fallback picker or the service probe: it is a
+  // stage of the chain, not a choice within it.
+  monochrome: { label: 'Monochrome', icon: '', lucidaSlug: null }
 };
 const UNKNOWN_SERVICE = { label: 'Unknown source', icon: '', lucidaSlug: null };
 const serviceHealth = {};
@@ -316,11 +321,50 @@ function freshGroupIds(results, prefix) {
 
 let searchHistory = [];
 let historyIndex = -1;
+// A second search while one is in flight reassigns #scraper-view's src, which
+// aborts the load the first one is still awaiting (ERR_ABORTED -3). Hitting
+// Enter twice was enough to do it, so searches are single-flight.
+let searchInFlight = false;
+let scrapeHandoff = false;
+let scrapeLockTimer = null;
+
+// The lock outlives performSearch on the Lucida path, so every way that path can
+// end - parsed, failed to load, or never came back at all - has to free it, or
+// the search box stays dead for the rest of the session.
+function releaseSearchLock() {
+  clearTimeout(scrapeLockTimer);
+  scrapeLockTimer = null;
+  searchInFlight = false;
+}
+
+function armScrapeLockWatchdog() {
+  clearTimeout(scrapeLockTimer);
+  scrapeLockTimer = setTimeout(() => {
+    if (!searchInFlight || challengeVisible) return;
+    log('search.error', { kind: 'scrape', message: 'no dom-ready within 60s' });
+    statusText.innerText = 'Lucida did not respond. Try again.';
+    releaseSearchLock();
+  }, 60000);
+}
 
 async function performSearch(isHistoryAction = false) {
   if (!searchInput) return;
   const query = searchInput.value.trim();
   if (!query) return;
+  if (searchInFlight) return;
+  searchInFlight = true;
+  scrapeHandoff = false;
+  try {
+    await runSearch(query, isHistoryAction);
+  } finally {
+    // The Lucida path returns as soon as it has pointed the webview at a URL;
+    // its dom-ready handler releases the lock once the parse is done.
+    if (scrapeHandoff) armScrapeLockWatchdog();
+    else releaseSearchLock();
+  }
+}
+
+async function runSearch(query, isHistoryAction) {
 
   if (!isHistoryAction) {
     if (historyIndex >= 0 && searchHistory[historyIndex] === query) {
@@ -420,6 +464,7 @@ async function performSearch(isHistoryAction = false) {
   }
 
   scraperMode = 'lucida';
+  scrapeHandoff = true; // the dom-ready handler owns the search lock from here
   pendingScrapeKey = cacheKey; // what the scraper's dom-ready handler caches under
   if (query.startsWith('http')) {
     isCurrentSearchALink = true;
@@ -471,7 +516,24 @@ scraperView.addEventListener('dom-ready', async () => {
   const script = `
     new Promise((resolve) => {
       let attempts = 0;
+      // Cloudflare answers Lucida with an interstitial that has none of the
+      // elements below, so without this the poll just times out into an empty
+      // result and the search fails silently. Its served HTML carries only the
+      // title and #challenge-error-text - the form, the widget and the turnstile
+      // script all arrive later - so the match has to be broad.
+      const isChallenge = () => !!(
+        document.querySelector('[id^="challenge-"]')
+        || document.querySelector('[id^="cf-chl-widget"]')
+        || document.querySelector('script[src*="challenges.cloudflare.com"]')
+        || /^(just a moment|attention required)/i.test(document.title || '')
+      );
+      if (isChallenge()) { resolve({ challenge: true }); return; }
       const interval = setInterval(() => {
+        if (isChallenge()) {
+          clearInterval(interval);
+          resolve({ challenge: true });
+          return;
+        }
         const cards = Array.from(document.querySelectorAll('.search-result'));
         const trackElements = Array.from(document.querySelectorAll('div[id^="track-"]'));
         
@@ -570,6 +632,15 @@ scraperView.addEventListener('dom-ready', async () => {
 
   try {
     const data = await scraperView.executeJavaScript(script);
+    if (data && data.challenge) {
+      // Leave the lock held: the challenge navigates on its own when solved,
+      // which re-fires this handler and parses the real page.
+      log('search.challenge', { url: scraperView.getURL() });
+      showChallengeOverlay();
+      statusText.innerText = 'Lucida is behind a Cloudflare check - solve it to continue.';
+      return;
+    }
+    hideChallengeOverlay();
     log('search.result', { kind: 'scrape', tracks: (data || []).length, url: scraperView.getURL() });
     if (pendingScrapeKey && data && data.length) {
       ipcRenderer.send('cache-set', { key: pendingScrapeKey, value: data });
@@ -580,7 +651,53 @@ scraperView.addEventListener('dom-ready', async () => {
     log('search.error', { kind: 'scrape', message: err.message });
     statusText.innerText = 'Error parsing results.';
     console.error(err);
+  } finally {
+    if (!challengeVisible) releaseSearchLock();
   }
+});
+
+// A dead link or a DNS failure never produces dom-ready, so the parse handler
+// above would never run to free the lock.
+scraperView.addEventListener('did-fail-load', (e) => {
+  if (scraperMode !== 'lucida' || !e.isMainFrame || !searchInFlight) return;
+  if (e.errorCode === -3) return; // superseded navigation, not a real failure
+  log('search.error', { kind: 'scrape', message: e.errorDescription || 'load failed' });
+  statusText.innerText = 'Could not reach Lucida: ' + (e.errorDescription || 'load failed');
+  hideChallengeOverlay();
+  releaseSearchLock();
+});
+
+// The scraper webview is parked offscreen at 0.001 opacity. A Cloudflare
+// challenge is the one thing that cannot be answered without the user, so for
+// as long as one is up the webview is promoted to a real, clickable panel.
+const SCRAPER_HIDDEN_STYLE = scraperView.getAttribute('style') || '';
+let challengeVisible = false;
+
+function showChallengeOverlay() {
+  if (challengeVisible) return;
+  challengeVisible = true;
+  document.getElementById('challenge-overlay')?.classList.add('visible');
+  scraperView.setAttribute('style',
+    'position:fixed; left:50%; top:96px; transform:translateX(-50%);' +
+    'width:min(560px,92vw); height:min(520px,70vh); z-index:1001;' +
+    'opacity:1; pointer-events:auto; border-radius:10px; background:#fff;');
+}
+
+function hideChallengeOverlay() {
+  if (!challengeVisible) return;
+  challengeVisible = false;
+  document.getElementById('challenge-overlay')?.classList.remove('visible');
+  scraperView.setAttribute('style', SCRAPER_HIDDEN_STYLE);
+}
+
+// Giving up on the challenge has to free the search lock the overlay is holding.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !challengeVisible) return;
+  hideChallengeOverlay();
+  statusText.innerText = 'Search cancelled.';
+  pendingScrapeKey = null;
+  scraperView.src = 'about:blank';
+  releaseSearchLock();
 });
 
 // Artwork hover-to-zoom: a small wrapper around the cover <img> that shows a
@@ -754,6 +871,19 @@ function renderResults(data) {
   resultsList.appendChild(rows);
 }
 
+// The engine (src/engine) owns the queue now. `downloadQueue`,
+// `isProcessingQueue` and `currentProcessingItem` survive only because session
+// restore and a few status readouts still reference them; nothing drives a
+// download through them any more. They were also the reason only one download
+// could ever be in flight - there was exactly one of each.
+let engine = null; // the Controller, once boot() has started it
+// A restored session can enqueue before boot() has finished importing the
+// engine, so anything submitted early waits here rather than being dropped.
+const pendingSubmissions = [];
+function submitToEngine(queueItem) {
+  if (engine) engine.add(queueItem);
+  else pendingSubmissions.push(queueItem);
+}
 let downloadQueue = [];
 let isProcessingQueue = false;
 let currentProcessingItem = null;
@@ -824,18 +954,16 @@ function enqueueAll(items) {
       if (existing && existing.done) {
         markAlreadyDownloaded(qi, existing);
       } else {
-        downloadQueue.push(qi);
+        submitToEngine(qi);
       }
     });
     updateQueueStatus();
     persistSoon();
-    if (!isProcessingQueue) processNextInQueue();
   }).catch(e => {
     console.warn('[queue] existing-file check failed:', e.message);
-    queueItems.forEach(qi => downloadQueue.push(qi));
+    queueItems.forEach(submitToEngine);
     updateQueueStatus();
     persistSoon();
-    if (!isProcessingQueue) processNextInQueue();
   });
 }
 
@@ -929,6 +1057,44 @@ function buildSearchVariants(title, artist, album) {
 
 function lucidaSearchUrl(query, service) {
   return `https://lucida.to/search?query=${encodeURIComponent(query)}&service=${service}`;
+}
+
+// ---------------------------------------------------------------------------
+// Monochrome - the plan B for when Lucida has nothing
+//
+// Lucida is one transport in front of several stores, so when it is down, or the
+// track is in none of the catalogues it fronts, every service in the chain fails
+// for the same reason and the track is lost. monochrome.tf is an independent
+// site with its own catalogue (Apple Music metadata, its own stream backends), so
+// its failures are uncorrelated with Lucida's - which is the whole point of a
+// fallback.
+//
+// It is driven exactly like Lucida: point #download-view at a search URL, poll
+// the rendered page from inside the webview, pick the best-matching card, click
+// through to a download. The file arrives as a blob the page hands to an <a
+// download>, which fires Chromium's will-download in the main process just like
+// Lucida's direct link does - so nothing downstream of the click needs to know
+// which site produced the file.
+//
+// It is slower than Lucida: it resolves a stream, fetches it, and may run
+// ffmpeg.wasm to remux before the anchor click ever happens, so the start
+// timeout below is minutes rather than the 120s a Lucida link gets.
+// ---------------------------------------------------------------------------
+const MONOCHROME_START_TIMEOUT_MS = 300000;
+const MONOCHROME_FIND_POLLS = 60;      // 500ms each - finding and clicking a card
+const MONOCHROME_PREPARE_POLLS = 240;  // 1s each - stream resolve + remux
+
+function monochromeSearchUrl(query) {
+  return `https://monochrome.tf/search/${encodeURIComponent(query)}`;
+}
+
+// The search URL for a query, on whichever site this attempt is aimed at. Every
+// place that re-searches a track goes through this, so a variant retry stays on
+// the site the item had reached rather than falling back to Lucida.
+function attemptUrlFor(item, query) {
+  return item && item.source === 'monochrome'
+    ? monochromeSearchUrl(query)
+    : lucidaSearchUrl(query, serviceOf(item));
 }
 
 // Which store the current attempt is aimed at, for status text.
@@ -2087,7 +2253,7 @@ function tryNextSearchVariant(item, reason, detail) {
   const next = (item.searchVariantIndex || 0) + 1;
   if (!variants || next >= variants.length) return false;
   item.searchVariantIndex = next;
-  item.url = lucidaSearchUrl(variants[next], serviceOf(item));
+  item.url = attemptUrlFor(item, variants[next]);
   item.attempts = 0;
   activeDownloads[item.id].status = 'queued';
   const textEl = document.getElementById('dl-text-' + item.id);
@@ -2112,6 +2278,13 @@ function tryFallbackOrAbandon(item, reason, detail = null) {
   const service = FALLBACK_SERVICES.find((sv) => already.indexOf(sv) === -1 && !(serviceHealth[sv] && serviceHealth[sv].status === 'unavailable'));
 
   if (!item.searchQuery || !service) {
+    // Lucida has nothing left to offer. Monochrome is a different site with a
+    // different catalogue, so it is worth one shot before the track is written
+    // off - but only one, and only once per pass through the chain.
+    if (item.searchQuery && !item.monochromeTried) {
+      startMonochromeAttempt(item, reason, detail);
+      return;
+    }
     if (item.ytFallbackUrl) {
       triggerYTDlpFallback(item, reason, detail);
     } else {
@@ -2124,6 +2297,7 @@ function tryFallbackOrAbandon(item, reason, detail = null) {
   if (clearStartListener) { clearStartListener(); clearStartListener = null; }
 
   item.fallbackIndex = FALLBACK_SERVICES.indexOf(service);
+  item.source = null; // back on Lucida - see attemptUrlFor
   item.service = service; // what the index meant, in case the chain changes later
   item.attemptService = service;
   item.attempts = 0; // the attempt budget is per service
@@ -2140,6 +2314,39 @@ function tryFallbackOrAbandon(item, reason, detail = null) {
   console.warn('[fallback]', item.name, '|', from, '->', service, '|', reason);
 
   if (item.groupId) updateGroupUI(item.groupId, item, 'Trying ' + service);
+
+  downloadQueue.unshift(item);
+  if (currentProcessingItem && currentProcessingItem.id === item.id) currentProcessingItem = null;
+  persistSoon();
+  setTimeout(processNextInQueue, 1000);
+}
+
+// Hand the track to Monochrome. Same shape as a service fallback - rewind the
+// per-attempt counters, point the item at a new search URL, put it back at the
+// front of the queue - except that the URL is a different site, which is what
+// item.source records for everything downstream.
+function startMonochromeAttempt(item, reason, detail) {
+  clearTimeout(downloadTimeout);
+  if (clearStartListener) { clearStartListener(); clearStartListener = null; }
+
+  const from = serviceOf(item);
+  item.monochromeTried = true;
+  item.source = 'monochrome';
+  item.attemptService = 'monochrome';
+  item.attempts = 0;
+  item.searchVariantIndex = 0;
+  item.url = monochromeSearchUrl((item.searchVariants || [item.searchQuery])[0]);
+  activeDownloads[item.id].status = 'queued';
+
+  const fillEl = document.getElementById('dl-fill-' + item.id);
+  const textEl = document.getElementById('dl-text-' + item.id);
+  if (fillEl) { fillEl.style.width = '0%'; fillEl.style.background = '#007bff'; }
+  if (textEl) textEl.innerText = 'Not on Lucida — checking Monochrome';
+  updateCoverOverlay(item.id, 'searching');
+  log('fallback.monochrome', { id: item.id, name: item.name, from, reason, detail, url: item.url });
+  console.warn('[fallback]', item.name, '|', from, '-> monochrome |', reason);
+
+  if (item.groupId) updateGroupUI(item.groupId, item, 'Trying Monochrome');
 
   downloadQueue.unshift(item);
   if (currentProcessingItem && currentProcessingItem.id === item.id) currentProcessingItem = null;
@@ -2230,115 +2437,95 @@ function abandonItem(item, reason, detail = null) {
   }
 }
 
-function processNextInQueue() {
-  // A pause must not consume an item: leave the queue exactly as it is and let
-  // setQueuePaused(false) call back in.
-  if (queuePaused) {
-    isProcessingQueue = false;
-    currentProcessingItem = null;
-    return;
-  }
+// How many extra passes a skipped track gets once the queue has otherwise
+// drained. One is the useful number: it costs a second full chain per track that
+// failed, and a failure that survives two independent passes over two sites is
+// not a transient one.
+const MAX_RETRY_ROUNDS = 1;
 
-  if (downloadQueue.length === 0) {
-    isProcessingQueue = false;
-    currentProcessingItem = null;
-    // Nothing left to resume. Drop the saved queue rather than replay it next
-    // launch, where every item would just be skipped as already downloaded.
-    if (!Object.values(activeDownloads).some((d) => d.status === 'queued' || d.status === 'downloading')) {
-      persistCancel();
-      ipcRenderer.send('queue-clear');
+// Put every track skipped in THIS run back on the queue with its whole history
+// wiped, so it re-runs the full chain - every Lucida store, then Monochrome -
+// rather than resuming where it gave up. Returns false when there is nothing to
+// retry, which is what lets the queue finally settle.
+//
+// The budget is per track, not per run: an album queued after an earlier retry
+// round has still had none of its own, and a global counter would silently deny
+// it one.
+function requeueSkippedForRetry() {
+  const items = Object.keys(activeDownloads)
+    .filter((id) => activeDownloads[id].status === 'skipped'
+                    && activeDownloads[id].item
+                    && (activeDownloads[id].item.retryRounds || 0) < MAX_RETRY_ROUNDS
+                    // a skip inherited from an earlier session was already given
+                    // its passes then; restoreSession deliberately leaves it be
+                    && !activeDownloads[id].item.skippedInEarlierRun)
+    .map((id) => activeDownloads[id].item);
+  if (!items.length) return false;
+
+  items.forEach((item) => {
+    item.retryRounds = (item.retryRounds || 0) + 1;
+    item.tried = [];
+    item.triedServices = [];
+    item.fallbackIndex = -1;
+    item.attempts = 0;
+    item.searchVariantIndex = 0;
+    item.monochromeTried = false;
+    item.source = null;
+    // Back to the top of the chain, on the store the track was first found on -
+    // but only if Lucida actually fronts it, or the retry would re-search a slug
+    // Lucida has never heard of.
+    item.attemptService = serviceDefinition(item.originalService).lucidaSlug || 'qobuz';
+    item.url = lucidaSearchUrl((item.searchVariants || [item.searchQuery])[0], serviceOf(item));
+
+    activeDownloads[item.id].status = 'queued';
+    persistedDownloadIds.add(item.id);
+    if (item.groupId && groupStats[item.groupId]) {
+      groupStats[item.groupId].skipped = Math.max(0, groupStats[item.groupId].skipped - 1);
+      updateGroupUI(item.groupId);
     }
-    return;
-  }
-  
-  isProcessingQueue = true;
-  currentProcessingItem = downloadQueue.shift();
+    const fillEl = document.getElementById('dl-fill-' + item.id);
+    const textEl = document.getElementById('dl-text-' + item.id);
+    if (fillEl) { fillEl.style.width = '0%'; fillEl.style.background = '#007bff'; }
+    if (textEl) textEl.innerText = `Retrying (pass ${(item.retryRounds || 0) + 1})…`;
+    updateCoverOverlay(item.id, 'searching');
+    downloadQueue.push(item);
+  });
+
+  log('retry.round', { items: items.length,
+                       names: items.map((i) => i.name) });
+  console.warn('[retry.round]', items.length, 'previously skipped track(s) going back through the chain');
+  statusText.innerText = `Queue drained — retrying ${items.length} skipped track${items.length === 1 ? '' : 's'}.`;
+  updateBadge();
   updateQueueStatus();
-  // The item was already present in the last snapshot. Leaving it there until it
-  // reaches a terminal state is both crash-safe and avoids rewriting a full queue
-  // for every dequeue.
-  
-  if (currentProcessingItem.groupId && groupStats[currentProcessingItem.groupId]) {
-      groupStats[currentProcessingItem.groupId].downloading = true;
-      updateGroupUI(currentProcessingItem.groupId, currentProcessingItem, 'Fetching');
-  }
-  
-  currentProcessingItem.originalService = currentProcessingItem.originalService || serviceFromUrl(currentProcessingItem.url) || currentProcessingItem.service || 'lucida';
-  currentProcessingItem.attemptService = currentProcessingItem.attemptService || currentProcessingItem.originalService;
-  currentProcessingItem.triedServices = currentProcessingItem.triedServices || (currentProcessingItem.tried || []).map((t) => t.service || t).filter(Boolean);
-  currentProcessingItem.searchVariants = currentProcessingItem.searchVariants || [currentProcessingItem.searchQuery || buildSearchQuery(currentProcessingItem.title, currentProcessingItem.artist)];
-  currentProcessingItem.searchVariantIndex = currentProcessingItem.searchVariantIndex || 0;
-  currentProcessingItem.attemptStartedAt = Date.now();
-  log('attempt.start', {
-    id: currentProcessingItem.id, name: currentProcessingItem.name,
-    service: serviceOf(currentProcessingItem), fallbackIndex: currentProcessingItem.fallbackIndex,
-    attempt: (currentProcessingItem.attempts || 0) + 1, url: currentProcessingItem.url,
-    queueDepth: downloadQueue.length
-  });
-
-  const textEl = document.getElementById('dl-text-' + currentProcessingItem.id);
-  if (textEl) textEl.innerText = 'Fetching...';
-  updateCoverOverlay(currentProcessingItem.id, 'searching');
-
-  ipcRenderer.send('set-next-download-folder', {
-    itemId: currentProcessingItem.id,
-    folderName: currentProcessingItem.folderName,
-    artworkUrl: currentProcessingItem.groupArtwork,
-    key: currentProcessingItem.key, // lets the main process record it as downloaded
-    // for the folder report: only the main process sees the finished file, only
-    // the renderer knows which track and which store it belongs to
-    title: currentProcessingItem.title,
-    artist: currentProcessingItem.artist,
-    group: currentProcessingItem.groupName || null,
-    originalService: currentProcessingItem.originalService,
-    attemptService: currentProcessingItem.attemptService,
-    service: serviceOf(currentProcessingItem),
-    sourceUrl: currentProcessingItem.url,
-    tried: currentProcessingItem.tried || [],
-    triedServices: currentProcessingItem.triedServices || []
-  });
-  
-  let started = false;
-  
-  const onStart = (event, payload) => {
-    if (payload && payload.itemId && payload.itemId !== currentProcessingItem.id) return;
-    started = true;
-    ipcRenderer.removeListener('download-started', onStart);
-    clearStartListener = null;
-    clearTimeout(downloadTimeout);
-  };
-
-  ipcRenderer.on('download-started', onStart);
-  clearStartListener = () => ipcRenderer.removeListener('download-started', onStart);
-  
-  lastHandledDownloadUrl = null; // allow the cascade to re-run on retry
-  if (downloadView.src === currentProcessingItem.url) {
-    downloadView.reload();
-  } else {
-    downloadView.src = currentProcessingItem.url;
-  }
-  
-  downloadTimeout = setTimeout(() => {
-    if (!started) handleNoStart(currentProcessingItem, 'Timed out');
-  }, 120000);
+  persistSoon();
+  return true;
 }
 
-downloadView.addEventListener('dom-ready', async () => {
-  const currentUrl = downloadView.getURL();
-  if (!currentUrl || currentUrl === 'about:blank') return;
-  // Guard against duplicate dom-ready events for the same page. This compares the
-  // WEBVIEW's url; comparing the renderer's own location to itself was always true
-  // after the first event, which silently disabled this handler for every track.
-  if (currentUrl === lastHandledDownloadUrl) return;
-  lastHandledDownloadUrl = currentUrl;
+// The engine owns the queue now. This remains only because a dozen legacy call
+// sites still say setTimeout(processNextInQueue, 1000) after some state change;
+// each of those used to be the ONLY thing that kept the queue moving, and each
+// paid a fixed delay whether or not anything was waiting. The engine starts work
+// the moment a slot frees, so there is nothing left for them to kick.
+function processNextInQueue() {
+  if (engine && !engine.paused) engine.resume();
+}
 
-  const expecting = currentProcessingItem || {};
-
-  // The cascade must run INSIDE the webview. Executed in the renderer it only ever
-  // queried index.html, so it never found a download button on the Lucida page.
-  const script = `
-    new Promise((resolve) => {
-      const EXPECTED = ${JSON.stringify({ title: expecting.title || '', artist: expecting.artist || '' })};
+// SUPERSEDED - do not edit to change matching behaviour.
+//
+// The live scorer is src/engine/matching.mjs, and the live cascades are
+// src/engine/cascade-lucida.mjs and cascade-monochrome.mjs. This copy and the
+// runMonochromeCascade / dom-ready handler below it are no longer reached: the
+// engine drives its own worker webviews, and nothing navigates #download-view
+// any more. They are left in place only until the React view layer retires this
+// file. Editing the rules HERE will change nothing at runtime.
+//
+// The card-scoring rules, as source text, because they have to run INSIDE the
+// webview. Both cascades - Lucida and Monochrome - inject this so a hit that is
+// good enough for one site is good enough for the other, and a fix to the
+// matching lands in both at once.
+function matchScorerJs(expected) {
+  return `
+      const EXPECTED = ${JSON.stringify({ title: (expected && expected.title) || '', artist: (expected && expected.artist) || '' })};
       const MIN_TITLE_SCORE = ${MIN_TITLE_SCORE};
 
       // Lucida search hits are ranked by its own relevance, which happily returns a
@@ -2391,6 +2578,254 @@ downloadView.addEventListener('dom-ready', async () => {
         }
         return { t, a: artistOk };
       };
+`;
+}
+// The Monochrome equivalent of the Lucida cascade below: find the right card on
+// the search page, open its row menu, click Download, then wait to learn whether
+// a file is actually coming.
+//
+// Monochrome does not link to a file - it resolves a stream, fetches it, may
+// remux it in ffmpeg.wasm, and only then hands the browser a blob through an
+// <a download>. So "did this work?" cannot be answered by watching for a
+// navigation. Two signals settle it instead: that anchor click, hooked here
+// because it is the exact moment Chromium's will-download fires, and the site's
+// own error toast, which is the only thing it says when a track has no stream.
+async function runMonochromeCascade(expecting, currentUrl) {
+  const script = `
+    new Promise((resolve) => {
+${matchScorerJs({ title: expecting.title, artist: expecting.artist })}
+
+      const PREPARE_POLLS = ${MONOCHROME_PREPARE_POLLS};
+      const FIND_POLLS = ${MONOCHROME_FIND_POLLS};
+
+      let LABEL = null, CANDIDATES = [], CONSIDERED = 0;
+      let done = false;
+      const undo = [];
+      const finish = (value) => {
+        if (done) return;
+        done = true;
+        undo.forEach((fn) => { try { fn(); } catch (e) { /* nothing to unwind */ } });
+        resolve(value);
+      };
+
+      // A download attempt ends in an <a download> click. Hooking the prototype
+      // catches it whatever element the page builds, and forwarding to the real
+      // click first means the download still happens - this only observes it.
+      const nativeClick = HTMLAnchorElement.prototype.click;
+      HTMLAnchorElement.prototype.click = function () {
+        const isFile = !!this.download;
+        const out = nativeClick.call(this);
+        if (isFile) finish({ outcome: 'download-triggered', label: LABEL, file: this.download,
+                             candidates: CANDIDATES, considered: CONSIDERED });
+        return out;
+      };
+      undo.push(() => { HTMLAnchorElement.prototype.click = nativeClick; });
+
+      // "Couldn't download X: no audio stream is available for this track" and
+      // friends. The site puts every download notice in this one container.
+      const ERR = /couldn'?t download|could not find audio source|failed to download|no audio stream|not found on the provider|cannot be downloaded|failed to play/i;
+      const readError = (text) => {
+        if (!ERR.test(text || '')) return null;
+        const line = String(text).split('\\n').map((l) => l.trim()).filter((l) => ERR.test(l))[0];
+        return line || String(text).trim().slice(0, 200);
+      };
+
+      // These toasts dismiss themselves, and a poll on a one-second timer misses
+      // one that came and went in between - which reads as a hang rather than the
+      // failure it was. So latch the first error the container ever shows, and
+      // keep the poll below only as a backstop for a notice that was already
+      // there when this script started.
+      // The container itself is created lazily, on the first notice of the page's
+      // life, so watching for it has to start at the body and narrow down once it
+      // exists.
+      let latchedError = null;
+      let watched = null;
+      const watchNotices = () => {
+        const host = document.getElementById('download-notifications');
+        if (!host || host === watched) return;
+        watched = host;
+        if (!latchedError) latchedError = readError(host.innerText || '');
+        const observer = new MutationObserver(() => {
+          if (!latchedError) latchedError = readError(host.innerText || '');
+        });
+        observer.observe(host, { childList: true, subtree: true, characterData: true });
+        undo.push(() => observer.disconnect());
+      };
+      watchNotices();
+      const errorNotice = () => {
+        watchNotices();
+        return latchedError
+          || readError((document.getElementById('download-notifications') || {}).innerText || '');
+      };
+
+      // Nothing to poll for on success - the anchor hook above resolves that
+      // case - so this only watches for the failure toast and the deadline.
+      const waitForOutcome = () => {
+        let polls = 0;
+        const timer = setInterval(() => {
+          const err = errorNotice();
+          if (err) {
+            clearInterval(timer);
+            finish({ outcome: 'provider-failed', label: LABEL, message: err,
+                     candidates: CANDIDATES, considered: CONSIDERED });
+          } else if (++polls > PREPARE_POLLS) {
+            clearInterval(timer);
+            finish({ outcome: 'timeout', label: LABEL });
+          }
+        }, 1000);
+        undo.push(() => clearInterval(timer));
+      };
+
+      // Download lives in the row's overflow menu, which is built lazily, so the
+      // entry has to be waited for rather than queried straight after the click.
+      const openMenuAndDownload = (best) => {
+        const trigger = best.el.querySelector('.track-menu-btn');
+        if (!trigger) { finish({ outcome: 'no-download-control', label: LABEL }); return; }
+        trigger.click();
+        let tries = 0;
+        const timer = setInterval(() => {
+          const menu = document.getElementById('context-menu');
+          const entry = menu && menu.querySelector('li[data-action="download"]');
+          const open = menu && getComputedStyle(menu).display !== 'none';
+          if (entry && open) {
+            clearInterval(timer);
+            entry.click();
+            waitForOutcome();
+          } else if (++tries > 20) {
+            clearInterval(timer);
+            finish({ outcome: 'no-download-control', label: LABEL });
+          }
+        }, 200);
+        undo.push(() => clearInterval(timer));
+      };
+
+      const clean = (el) => (el ? el.innerText || '' : '').replace(/\\s+/g, ' ').trim();
+      // The artist cell reads "Valve • 2007" - the year is part of the same line
+      // and would otherwise be scored as an unmatched artist token.
+      const cleanArtist = (el) => clean(el).replace(/\\s*[•·]\\s*\\d{4}\\s*$/, '').trim();
+
+      const findAndClick = () => {
+        const host = document.getElementById('search-tracks-container');
+        if (!host) return false; // the SPA has not rendered the tracks tab yet
+        const placeholder = host.querySelector('.placeholder-text');
+        if (placeholder && /no tracks found/i.test(placeholder.innerText || '')) {
+          finish({ outcome: 'no-results' });
+          return true;
+        }
+        const cards = Array.from(host.querySelectorAll('.track-item'));
+        if (!cards.length) return false; // still loading
+
+        const scored = [];
+        for (const card of cards) {
+          const cand = {
+            el: card,
+            title: clean(card.querySelector('.track-item-details .title')),
+            artist: cleanArtist(card.querySelector('.track-item-details .artist'))
+          };
+          if (!cand.title) continue;
+          cand.s = score(cand.title, cand.artist);
+          scored.push(cand);
+        }
+        scored.sort((x, y) => (y.s.a - x.s.a) || (y.s.t - x.s.t));
+        const best = scored[0] || null;
+        CANDIDATES = scored.slice(0, 5).map((c) => ({
+          title: c.title, artist: c.artist,
+          t: Math.round(c.s.t * 100) / 100, a: c.s.a
+        }));
+        CONSIDERED = scored.length;
+        LABEL = best ? best.title + ' - ' + best.artist : 'none';
+
+        if (!best || best.s.a !== 1 || best.s.t < MIN_TITLE_SCORE) {
+          finish({ outcome: 'no-match', label: LABEL, candidates: CANDIDATES, considered: CONSIDERED });
+          return true;
+        }
+        openMenuAndDownload(best);
+        return true;
+      };
+
+      if (findAndClick()) return;
+      let polls = 0;
+      const timer = setInterval(() => {
+        if (done || findAndClick()) { clearInterval(timer); return; }
+        if (++polls > FIND_POLLS) { clearInterval(timer); finish({ outcome: 'no-results' }); }
+      }, 500);
+      undo.push(() => clearInterval(timer));
+    });
+  `;
+
+  let outcome;
+  try {
+    outcome = await downloadView.executeJavaScript(script);
+  } catch (err) {
+    console.warn('[monochrome] injection failed:', err.message);
+    return;
+  }
+  const res = (outcome && typeof outcome === 'object') ? outcome : { outcome: String(outcome) };
+  const label = res.label && res.label !== 'none' ? res.label : null;
+  console.log('[monochrome]', res.outcome, res.label || '', '<-', currentUrl);
+
+  log('attempt.outcome', {
+    id: expecting.id, name: expecting.name, service: 'monochrome', outcome: res.outcome,
+    label, message: res.message || null, considered: res.considered || 0,
+    ms: Date.now() - (expecting.attemptStartedAt || Date.now()), url: currentUrl
+  });
+  if (res.candidates && res.candidates.length) {
+    log('match.candidates', {
+      id: expecting.id, service: 'monochrome',
+      wanted: { title: expecting.title, artist: expecting.artist },
+      accepted: res.outcome === 'download-triggered', minTitleScore: MIN_TITLE_SCORE,
+      candidates: res.candidates
+    });
+  }
+
+  // The file is on its way; will-download and the 'download-started' listener
+  // own the item from here.
+  if (res.outcome === 'download-triggered') return;
+
+  // A late dom-ready for a page whose item has already been removed or settled.
+  if (!expecting.id || !activeDownloads[expecting.id]) return;
+
+  if (res.outcome === 'no-results') {
+    if (!tryNextSearchVariant(expecting, 'no-results')) tryFallbackOrAbandon(expecting, 'Not on Monochrome');
+  } else if (res.outcome === 'no-match') {
+    if (!tryNextSearchVariant(expecting, 'no-match', label)) tryFallbackOrAbandon(expecting, 'No confident match on Monochrome', label);
+  } else if (res.outcome === 'provider-failed') {
+    // A different pressing of the same track can have a stream when this one has
+    // none, so a variant is still worth trying before giving up on the site.
+    if (!tryNextSearchVariant(expecting, 'provider-failed', res.message)) {
+      tryFallbackOrAbandon(expecting, 'Monochrome could not supply this track', res.message || label);
+    }
+  } else if (res.outcome === 'no-download-control') {
+    handleNoStart(expecting, 'No download control found');
+  } else {
+    handleNoStart(expecting, 'Monochrome timed out preparing the file');
+  }
+}
+
+downloadView.addEventListener('dom-ready', async () => {
+  const currentUrl = downloadView.getURL();
+  if (!currentUrl || currentUrl === 'about:blank') return;
+  // Guard against duplicate dom-ready events for the same page. This compares the
+  // WEBVIEW's url; comparing the renderer's own location to itself was always true
+  // after the first event, which silently disabled this handler for every track.
+  if (currentUrl === lastHandledDownloadUrl) return;
+  lastHandledDownloadUrl = currentUrl;
+
+  const expecting = currentProcessingItem || {};
+
+  // Two different sites share this webview, so the page decides which cascade
+  // runs - not the item, which may have been replaced by the time a late
+  // dom-ready lands.
+  if (/(^|\.)monochrome\.tf$/i.test((() => { try { return new URL(currentUrl).hostname; } catch (e) { return ''; } })())) {
+    await runMonochromeCascade(expecting, currentUrl);
+    return;
+  }
+
+  // The cascade must run INSIDE the webview. Executed in the renderer it only ever
+  // queried index.html, so it never found a download button on the Lucida page.
+  const script = `
+    new Promise((resolve) => {
+${matchScorerJs({ title: expecting.title, artist: expecting.artist })}
 
       let emptyPolls = 0; // consecutive polls showing a rendered but empty result list
 
@@ -2678,22 +3113,18 @@ ipcRenderer.on('download-status', (event, { file, status, service, savePath }) =
     // Download finished successfully, process next!
     setTimeout(processNextInQueue, 1000);
   } else {
-    // Failed or Cancelled - RETRY
+    // Failed or cancelled. The engine's worker is awaiting this same event and
+    // owns what happens next - it carries the track on down its chain, or
+    // abandons it with a reason. Retrying from here as well would run two
+    // fallbacks for one failure and write a duplicate report entry, so this
+    // branch only paints.
     if (fillEl && textEl) {
       fillEl.style.background = '#dc3545';
-      textEl.innerText = `Failed (${status}) - Retrying...`;
+      textEl.innerText = `Transfer ${status} - trying the next source`;
     }
     if (queueItem.groupId) {
-       updateGroupUI(queueItem.groupId, queueItem, 'Failed - Retrying');
+       updateGroupUI(queueItem.groupId, queueItem, 'Retrying elsewhere');
     }
-    queueItem.attempts = (queueItem.attempts || 0) + 1;
-    if (queueItem.attempts >= MAX_START_ATTEMPTS) {
-      tryFallbackOrAbandon(queueItem, `Failed ${queueItem.attempts}x on ${serviceOf(queueItem)} (${status})`);
-      return;
-    }
-    // Push back to front of queue to retry immediately
-    downloadQueue.unshift(queueItem);
-    setTimeout(processNextInQueue, 2000);
   }
   
   statusText.innerText = `Download ${status}: ${file}`;
@@ -2940,25 +3371,15 @@ function setQueuePaused(paused) {
   updatePauseUI();
   log(paused ? 'queue.pause' : 'queue.resume', { depth: downloadQueue.length });
 
+  // Pausing stops NEW work from starting; anything already in flight is left to
+  // finish rather than being torn down and re-run, which is what the old code
+  // did by rewinding the item and blanking the webview.
   if (paused) {
     ipcRenderer.send('downloads-pause');
-    const item = currentProcessingItem;
-    const state = item && activeDownloads[item.id] ? activeDownloads[item.id].status : null;
-    if (item && state !== 'downloading' && state !== 'skipped') {
-      clearTimeout(downloadTimeout);
-      if (clearStartListener) { clearStartListener(); clearStartListener = null; }
-      currentProcessingItem = null;
-      isProcessingQueue = false;
-      downloadQueue.unshift(item);
-      lastHandledDownloadUrl = null;
-      downloadView.src = 'about:blank'; // stops the in-page cascade dead
-      const textEl = document.getElementById('dl-text-' + item.id);
-      if (textEl) textEl.innerText = 'Paused';
-    }
+    if (engine) engine.pause();
   } else {
     ipcRenderer.send('downloads-resume');
-    // a download still in flight resumes on its own; only an idle queue needs a kick
-    if (!currentProcessingItem) processNextInQueue();
+    if (engine) engine.resume();
   }
   persistSoon();
 }
@@ -3071,6 +3492,9 @@ async function restoreSession() {
       alreadyDone++;
     } else if (item.status === 'skipped') {
       activeDownloads[item.id].status = 'skipped';
+      // It already had its retry pass in the run that skipped it, so keep the
+      // end-of-queue retry from replaying the whole chain on every launch.
+      item.skippedInEarlierRun = true;
       const fillEl = document.getElementById('dl-fill-' + item.id);
       const textEl = document.getElementById('dl-text-' + item.id);
       if (fillEl) { fillEl.style.width = '100%'; fillEl.style.background = '#c8a415'; }
@@ -3078,7 +3502,10 @@ async function restoreSession() {
       if (item.groupId) groupStats[item.groupId].skipped++;
       staySkipped++;
     } else {
-      downloadQueue.push(item);
+      // Straight to the engine. Pushing onto downloadQueue here left every
+      // restored track sitting in a list nothing reads any more, so a resumed
+      // session silently downloaded nothing.
+      submitToEngine(item);
       requeued++;
     }
   });
@@ -3116,7 +3543,100 @@ async function boot() {
   applyServiceConfig(config.fallbackServices, 'config');
   renderServiceChoices();
   updatePauseUI();
+  await startDownloadEngine();
   await restoreSession();
+}
+
+// ---------------------------------------------------------------------------
+// Engine startup
+//
+// renderer.js is a classic script, so the engine's ES modules come in through a
+// dynamic import rather than a static one. Everything below the import is the
+// only wiring the rest of this file needs: submit tracks, read state back.
+// ---------------------------------------------------------------------------
+async function startDownloadEngine() {
+  try {
+    const mod = await import('./src/engine/index.mjs');
+    const container = document.getElementById('worker-views')
+      || document.body.appendChild(Object.assign(document.createElement('div'), { id: 'worker-views' }));
+
+    engine = mod.startEngine({
+      ipcRenderer,
+      container,
+      services: FALLBACK_SERVICES,
+      concurrency: Math.max(1, config.concurrency || mod.DEFAULT_CONCURRENCY),
+      log: (evt, data) => log(evt, data),
+      onChange: applyEngineState,
+      onDownloadStart: (itemId) => updateCoverOverlay(itemId, 'downloading'),
+    });
+
+    if (pendingSubmissions.length) {
+      engine.add(pendingSubmissions.splice(0, pendingSubmissions.length));
+    }
+    if (queuePaused) engine.pause();
+    // fallbackServices, not "services": each track's plan also begins with the
+    // store its own link points at, which is not in this list.
+    log('engine.started', { concurrency: engine.pool.concurrency, fallbackServices: FALLBACK_SERVICES });
+  } catch (err) {
+    console.error('[engine] failed to start:', err);
+    if (statusText) statusText.innerText = 'Download engine failed to start: ' + err.message;
+  }
+}
+
+// Push engine state into the existing rows. The engine reports WHICH source it
+// is asking and WHY something failed, so the row text is its statusText rather
+// than the old blanket "Fetching..." / "Skipped".
+function applyEngineState(controller) {
+  for (const rec of controller.getItems()) {
+    const id = rec.item.id;
+    const textEl = document.getElementById('dl-text-' + id);
+    if (textEl && rec.status !== 'downloading') textEl.innerText = rec.statusText;
+
+    const slot = activeDownloads[id] || (activeDownloads[id] = { item: rec.item });
+    if (slot.status !== rec.status) {
+      slot.status = rec.status;
+      if (rec.status === 'completed' || rec.status === 'skipped' || rec.status === 'cancelled') {
+        updateCoverOverlay(id, rec.status);
+        const fillEl = document.getElementById('dl-fill-' + id);
+        if (fillEl) {
+          fillEl.style.width = '100%';
+          fillEl.style.background = rec.status === 'completed' ? '#28a745'
+            : rec.status === 'skipped' ? '#c8a415' : '#6c757d';
+        }
+        if (rec.status === 'skipped') {
+          reportSkippedTrack(rec);
+        }
+        if (rec.item.groupId && groupStats[rec.item.groupId]) {
+          const g = groupStats[rec.item.groupId];
+          if (rec.status === 'completed') g.completed++;
+          else if (rec.status === 'skipped') g.skipped++;
+          updateGroupUI(rec.item.groupId, rec.item);
+        }
+      } else if (rec.status === 'searching') {
+        updateCoverOverlay(id, 'searching');
+      }
+    }
+  }
+  updateQueueStatus();
+  updateBadge();
+}
+
+// The folder's own record of what it is missing, and why. Nothing else survives
+// the app closing.
+function reportSkippedTrack(rec) {
+  if (rec.reported) return;
+  rec.reported = true;
+  ipcRenderer.send('report-track', {
+    section: 'missing',
+    folderName: rec.item.folderName,
+    entry: {
+      title: rec.item.title, artist: rec.item.artist,
+      group: rec.item.groupName || null,
+      searchQuery: rec.item.searchQuery || null,
+      reason: rec.statusText,
+      tried: rec.tried,
+    },
+  });
 }
 
 boot();

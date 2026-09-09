@@ -1,0 +1,11 @@
+import soundcloud from './assets/sources/soundcloud.png';
+import qobuz from './assets/sources/qobuz.png';
+import amazon from './assets/sources/amazon.png';
+import yandex from './assets/sources/yandex.png';
+import monochrome from './assets/sources/monochrome.svg';
+import spotify from './assets/sources/spotify.png';
+import youtube from './assets/sources/youtube.png';
+import deezer from './assets/sources/deezer.png';
+import napster from './assets/sources/napster.png';
+import tidal from './assets/sources/tidal.ico';
+export const SOURCE_ASSETS = { soundcloud, qobuz, amazon, yandex, monochrome, spotify, youtube, deezer, napster, tidal };
