@@ -9,6 +9,7 @@ import { useSyncExternalStore, useCallback } from 'react';
 import { startEngine } from '../engine/renderer-integration.mjs';
 import { createSources } from '../engine/sources.mjs';
 import { makeMockController } from './mock.js';
+import { refreshSpotifyArtwork } from '../engine/spotify-artwork.mjs';
 
 // Electron's renderer runs with nodeIntegration, so `require` is on window.
 // Outside Electron (a browser preview) it is absent, and the app falls back to
@@ -40,10 +41,7 @@ export async function initEngine({ config, log }) {
       // How many transfers may keep running once the page that started them has
       // moved on. 0 restores the old wait-for-your-own-file behaviour.
       maxTransfers: config.maxTransfers == null ? 6 : config.maxTransfers,
-      planOptions: {
-        jamendo: (config.freeSources || ['jamendo']).includes('jamendo')
-          && !!String(config.jamendoClientId || '').trim(),
-      },
+      keepTrying: !!config.keepTrying,
       log,
     });
   }
@@ -57,6 +55,7 @@ export async function initEngine({ config, log }) {
 
   readyResolvers.forEach((r) => r(controller));
   readyResolvers = [];
+  if (isElectron) refreshSpotifyArtwork(controller, sources).catch(e => console.warn('Artwork refresh failed:', e.message));
   return controller;
 }
 
@@ -84,6 +83,9 @@ function makeScraper() {
           fn(arg);
         };
         const onReady = async () => {
+          let current = '';
+          try { current = view.getURL(); } catch (e) { /* not attached yet */ }
+          if (!current || current === 'about:blank') return;
           try { done(resolve, await view.executeJavaScript(script)); }
           catch (e) { done(reject, e); }
         };
@@ -91,7 +93,8 @@ function makeScraper() {
         const timer = setTimeout(() => done(reject, new Error('page load timed out')), 90000);
         view.addEventListener('dom-ready', onReady);
         view.addEventListener('did-fail-load', onFail);
-        view.src = url;
+        if (view.getAttribute('src') === url) view.reload();
+        else view.setAttribute('src', url);
       });
     },
   };
@@ -102,13 +105,6 @@ function makeScraper() {
 export const sources = createSources({
   httpJson: (url) => (ipc ? ipc.invoke('http-json', url) : Promise.reject(new Error('unavailable'))),
   scraper: isElectron ? makeScraper() : null,
-  // SoundCloud/YouTube links go through yt-dlp in the main process: SoundCloud
-  // sends no CORS header and its own API needs a client_id scraped out of the
-  // page's bundles, both of which yt-dlp already handles and keeps handling.
-  resolveMedia: isElectron ? (url) => ipc.invoke('media-resolve', url) : null,
-  // The 7-day disk cache the main process already keeps. Reading an album costs
-  // a yt-dlp call plus one request per track; opening it a second time should
-  // cost nothing.
   cache: isElectron ? {
     get: (key) => ipc.invoke('cache-get', key),
     set: (key, value) => ipc.send('cache-set', { key, value }),
@@ -132,6 +128,22 @@ function useEngineVersion() {
 export function useItems() {
   useEngineVersion();
   return controller ? controller.getItems() : [];
+}
+
+/**
+ * The byte channel: download progress ticks, several per second per transfer.
+ *
+ * The queue tree (groups, statuses, filters) must not re-render per tick, so it
+ * reads only the status version above. The components that draw bytes - a
+ * downloading row's bar, the dock - subscribe here instead. Guarded for the
+ * mock and pre-boot stores, which predate the split.
+ */
+export function useTransferProgress() {
+  const store = controller || emptyStore;
+  return useSyncExternalStore(
+    useCallback((cb) => (store.subscribeProgress ? store.subscribeProgress(cb) : () => {}), [store]),
+    useCallback(() => (store.getProgressSnapshot ? store.getProgressSnapshot() : 0), [store])
+  );
 }
 
 export function useStats() {

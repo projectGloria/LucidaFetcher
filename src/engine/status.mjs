@@ -7,12 +7,12 @@
 // live here, next to the outcomes they describe, so the engine and every view
 // agree on the wording and it can be changed in one place.
 
-import { SOURCE_LUCIDA, SOURCE_MONOCHROME, SOURCE_JAMENDO, SOURCE_SOUNDCLOUD, SOURCE_YOUTUBE, SOURCE_DIRECT } from './chain.mjs';
+import { SOURCE_LUCIDA, SOURCE_MONOCHROME, SOURCE_SOUNDCLOUD, SOURCE_YOUTUBE, SOURCE_DIRECT } from './chain.mjs';
 
 export const SERVICE_LABELS = {
   qobuz: 'Qobuz', tidal: 'Tidal', amazon: 'Amazon Music', deezer: 'Deezer',
   soundcloud: 'SoundCloud', spotify: 'Spotify', napster: 'Napster', yandex: 'Yandex Music',
-  monochrome: 'Monochrome', youtube: 'YouTube', jamendo: 'Jamendo',
+  monochrome: 'Monochrome', youtube: 'YouTube',
 };
 
 export function serviceLabel(service) {
@@ -28,7 +28,6 @@ export function describeStep(step, plan) {
   const suffix = sameSource.length > 1 && nth > 1 ? ` (wording ${nth} of ${sameSource.length})` : '';
 
   if (step.source === SOURCE_DIRECT) return `Fetching the ${label} upload this track came from`;
-  if (step.source === SOURCE_JAMENDO) return 'Searching free music on Jamendo';
   if (step.source === SOURCE_SOUNDCLOUD) return 'Searching SoundCloud';
   if (step.source === SOURCE_YOUTUBE) return 'Last resort: searching YouTube';
   if (step.source === SOURCE_MONOCHROME) return `Searching ${label}${suffix}`;
@@ -48,7 +47,13 @@ export function describeOutcome(outcome, ctx = {}) {
     case 'no-match': return `${service} had nothing matching this track${label}`;
     case 'provider-failed': return `${service} found it but could not supply the audio${ctx.message ? ` (${ctx.message})` : ''}`;
     case 'no-download-started': return `${service} accepted the download but never sent a file`;
-    case 'download-failed': return `The transfer from ${service} failed (${ctx.message || 'interrupted'})`;
+    case 'download-failed': {
+      if (ctx.message === 'rejected-track-identity')
+        return `The file from ${service} was a different recording — trying another source`;
+      if (ctx.message === 'rejected-no-artwork')
+        return `The file from ${service} had no embedded artwork — skipped`;
+      return `The transfer from ${service} failed (${ctx.message || 'interrupted'})`;
+    }
     case 'navigation-timeout': return `${service} did not load in time`;
     case 'timeout': return `${service} stopped responding while preparing the file`;
     case 'injection-failed': return `Lost the connection to the ${service} page`;

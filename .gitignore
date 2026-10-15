@@ -1,19 +1,26 @@
+# Build output
+dist/
+release/
 node_modules/
 
-# Runtime state: the queue, the download manifest and the scrape cache are all
-# machine-local and rewritten constantly.
+# Runtime data.
+#
+# DATA_ROOT in main.js is the app directory during development (an asar is
+# read-only, so a packaged build writes under userData instead), which means a
+# dev run writes all of this into the project. None of it is source: it holds
+# the scrape cache, the queue, the download manifest, past searches and
+# partially-transferred files.
 state/
 logs/
 
-# Build output
-dist/
-out/
+# A copy of an old Electron userData directory, cookies and all.
+lucidafetcherBAK/
 
-# Downloaded music and per-folder reports
-KAN/
+# Generated icons - `npm run icons` rebuilds them from scripts/make-icon.mjs
+build/icon.ico
+build/icon.png
+build/tray.png
 
-.DS_Store
+# OS noise
 Thumbs.db
-
-# electron-builder output
-release/
+.DS_Store

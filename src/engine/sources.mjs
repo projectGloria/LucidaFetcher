@@ -8,9 +8,16 @@
 
 import { buildSearchQuery } from './variants.mjs';
 import { lucidaSearchUrl } from './worker.mjs';
+import { createSpotifyMetadata } from './spotify-metadata.mjs';
+
+// Reserved DOS device names: illegal as a directory on Windows with or without
+// an extension, so a playlist called "AUX" has nowhere to be written. Mirrored
+// by WINDOWS_RESERVED in main.js, which resolves the same names to real paths.
+const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 
 export function sanitizeFolder(name) {
-  return String(name || '').replace(/[<>:"/\\|?*]+/g, '').trim() || 'Playlist';
+  const safe = String(name || '').replace(/[<>:"/\\|?*\x00-\x1f]+/g, '').trim().replace(/[. ]+$/g, '') || 'Playlist';
+  return RESERVED.test(safe.split('.')[0].trim()) ? safe.replace(/^([^.]*)/, '$1_') : safe;
 }
 
 // A profile download writes one folder per playlist INSIDE a folder named after
@@ -101,9 +108,14 @@ export function parseProfileInput(raw, service) {
     if (svc) { forced = svc[1].toLowerCase(); q = q.slice(svc[0].length).trim(); }
     if (!q) return null; // "user:" with nothing after it
   }
-  let m = /open\.spotify\.com\/user\/([^/?#]+)/i.exec(q);
-  if (m) return { service: 'spotify', user: decodeURIComponent(m[1]) };
-  m = /deezer\.com\/(?:[a-z]{2}\/)?profile\/(\d+)/i.exec(q);
+  let url;
+  try { url = new URL(q); } catch { /* typed username */ }
+  let m = url?.hostname === 'open.spotify.com' && /^\/(?:intl-[a-z]{2}\/)?user\/([^/]+)(?:\/|$)/i.exec(url.pathname);
+  if (m) {
+    try { return { service: 'spotify', user: decodeURIComponent(m[1]) }; }
+    catch { return null; }
+  }
+  m = ['deezer.com', 'www.deezer.com'].includes(url?.hostname) && /^\/(?:[a-z]{2}\/)?profile\/(\d+)(?:\/|$)/i.exec(url.pathname);
   if (m) return { service: 'deezer', user: m[1] };
   if (/^https?:/i.test(q)) return null; // some other link - not a profile
   return { service: forced || service || 'spotify', user: q };
@@ -139,17 +151,19 @@ export function classifyInput(raw, mode = 'auto') {
     return parsed ? { kind: 'profile', ...parsed } : { kind: 'unknown' };
   }
 
-  const profile = /^user:/i.test(q) || /open\.spotify\.com\/user\//i.test(q) || /deezer\.com\/(?:[a-z]{2}\/)?profile\//i.test(q);
+  const profile = /^user:/i.test(q) || /open\.spotify\.com\/(?:intl-[a-z]{2}\/)?user\//i.test(q) || /deezer\.com\/(?:[a-z]{2}\/)?profile\//i.test(q);
   if (profile) {
     const parsed = parseProfileInput(q);
     return parsed ? { kind: 'profile', ...parsed } : { kind: 'unknown' };
   }
 
-  let m = /open\.spotify\.com\/(?:embed\/)?(playlist|album)\/([A-Za-z0-9]+)/i.exec(q);
-  if (m) return { kind: 'spotify-playlist', id: m[2], url: q.split('?')[0], type: m[1].toLowerCase() };
+  let url;
+  try { url = new URL(q); } catch { /* track names are not URLs */ }
+  let m = url?.hostname === 'open.spotify.com' && /^\/(?:intl-[a-z]{2}\/)?(?:embed\/)?(playlist|album|track)\/([A-Za-z0-9]+)\/?$/i.exec(url.pathname);
+  if (m) return { kind: m[1].toLowerCase() === 'track' ? 'spotify-track' : 'spotify-playlist', id: m[2], url: q.split(/[?#]/)[0], type: m[1].toLowerCase() };
 
-  m = /deezer\.com\/(?:[a-z]{2}\/)?(playlist|album)\/(\d+)/i.exec(q);
-  if (m) return { kind: 'deezer-playlist', id: m[2], type: m[1].toLowerCase() };
+  m = ['deezer.com', 'www.deezer.com'].includes(url?.hostname) && /^\/(?:[a-z]{2}\/)?(playlist|album|track)\/(\d+)\/?$/i.exec(url.pathname);
+  if (m) return { kind: m[1].toLowerCase() === 'track' ? 'deezer-track' : 'deezer-playlist', id: m[2], type: m[1].toLowerCase() };
 
   // SoundCloud and YouTube are handled as one kind because one tool reads both:
   // yt-dlp resolves a single upload and a whole set through the same call, and
@@ -232,53 +246,48 @@ export function mapPool(items, limit, fn) {
   return Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker)).then(() => out);
 }
 
-const NEXT_DATA = /<script id="__NEXT_DATA__".*?>([^<]+)<\/script>/;
-
 // Spotify serves a stripped page - no playlist grid at all - to Electron's
 // default user agent. The profile scrape has to look like a desktop browser.
 export const SPOTIFY_DESKTOP_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
   + ' (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 
-export function createSources({ fetch: doFetch, httpJson, scraper, resolveMedia, cache, log = () => {} } = {}) {
+export function createSources({ fetch: doFetch, httpJson, scraper, cache, log = () => {}, spotifyTiming = {} } = {}) {
   const f = doFetch || (typeof fetch === 'function' ? fetch.bind(globalThis) : null);
+  const spotifyEmbedData = createSpotifyMetadata({ fetch: f, cache, log, ...spotifyTiming });
+  const trackArtwork = new Map();
+  const artworkQueue = [];
+  let activeArtwork = 0;
+  const pumpArtwork = () => {
+    while (activeArtwork < ART_POOL && artworkQueue.length) {
+      const task = artworkQueue.shift();
+      activeArtwork++;
+      task().finally(() => { activeArtwork--; pumpArtwork(); });
+    }
+  };
 
-  // Reading one album is a yt-dlp call plus one oEmbed request PER TRACK, so
-  // re-opening the same album - which is what a grid of them invites - costs the
-  // whole thing again and is what got this machine rate-limited to a 403 in the
-  // first place. The result is keyed by the URL and by whether artwork was asked
-  // for, since the cheap variant holds none of it.
-  const memo = new Map();
-  async function cached(key, make) {
-    if (memo.has(key)) return memo.get(key);
-    if (cache && cache.get) {
-      try {
-        const hit = await cache.get(key);
-        if (hit) { memo.set(key, hit); return hit; }
-      } catch (e) { /* a cold cache is not an error */ }
-    }
-    const value = await make();
-    // Only a good answer is worth keeping: caching "private or removed" would
-    // make a transient 403 permanent for a week.
-    if (value && !value.error) {
-      memo.set(key, value);
-      if (cache && cache.set) { try { cache.set(key, value); } catch (e) { /* best effort */ } }
-    }
-    return value;
+  // Share requests across playlists and cap the entire import, not each list.
+  // Failed requests are evicted so a later import can repair a missing cover.
+  function spotifyTrackArtwork(trackId) {
+    if (!trackId) return Promise.resolve('');
+    if (trackArtwork.has(trackId)) return trackArtwork.get(trackId);
+    const pending = new Promise(finish => {
+      artworkQueue.push(async () => {
+        let cover = '';
+        try {
+          const d = await spotifyEmbedData('https://open.spotify.com/track/' + trackId);
+          const entity = d?.props?.pageProps?.state?.data?.entity;
+          cover = largestImage(entity?.visualIdentity?.image) || largestImage(entity?.coverArt?.sources);
+        } catch { /* metadata failure must not discard the track */ }
+        if (!cover) trackArtwork.delete(trackId);
+        finish(cover);
+      });
+    });
+    trackArtwork.set(trackId, pending);
+    pumpArtwork();
+    return pending;
   }
 
-  async function spotifyEmbedData(url) {
-    const embedUrl = url.replace('open.spotify.com/', 'open.spotify.com/embed/');
-    const res = await f(embedUrl);
-    const html = await res.text();
-    const match = html.match(NEXT_DATA);
-    if (!match) return null;
-    return JSON.parse(match[1]);
-  }
-
-  /** Per-track artwork is opt-in: affordable for one playlist, ruinous for a
-   *  profile with a hundred. Without it every track carries the playlist cover,
-   *  which is what ends up in cover.jpg anyway. */
   async function spotifyPlaylist(url, opts = {}) {
     const status = opts.onStatus || (() => {});
     try {
@@ -297,31 +306,34 @@ export function createSources({ fetch: doFetch, httpJson, scraper, resolveMedia,
       const playlistName = opts.playlistName || entity?.name || 'Spotify Playlist';
 
       let images = trackList.map(() => defaultCover);
-      if (opts.perTrackArtwork) {
+      const artworkPending = trackList.map(() => true);
+      if (opts.perTrackArtwork !== false) {
         status('Fetching track artwork…');
-        images = await mapPool(trackList, ART_POOL, async (t) => {
+        images = await mapPool(trackList, ART_POOL, async (t, i) => {
           const trackId = String(t.uri || '').split(':').pop();
-          try {
-            const d = await spotifyEmbedData('https://open.spotify.com/track/' + trackId);
-            const imgs = d?.props?.pageProps?.state?.data?.entity?.visualIdentity?.image;
-            const best = largestImage(imgs);
-            if (best) return best;
-          } catch (e) { /* fall back to the playlist cover */ }
-          return defaultCover;
+          const cover = await spotifyTrackArtwork(trackId);
+          artworkPending[i] = !cover;
+          return cover || defaultCover;
         });
       }
 
       const group = {
-        id: 'spotify-' + Date.now(),
+        id: 'spotify-' + new URL(url).pathname.replace(/^\/(?:intl-[a-z]{2}\/)?(?:embed\/)?/, '').replace(/\//g, '-'),
         name: playlistName,
         folderName: sanitizeFolder(playlistName),
         artworkUrl: defaultCover,
+        service: 'spotify',
       };
       log('source.spotify', { name: playlistName, tracks: trackList.length });
       return {
         name: playlistName,
         group,
-        results: trackList.map((t, i) => buildTrackResult(t.title, t.subtitle || '', images[i], group)),
+        results: trackList.map((t, i) => buildTrackResult(t.title, t.subtitle || '', images[i], group, 'qobuz', {
+          service: 'spotify',
+          trackId: String(t.uri || '').split(':').pop() || undefined,
+          artworkPending: artworkPending[i],
+          durationSec: t.duration ? Math.round(t.duration / 1000) : undefined,
+        })),
       };
     } catch (e) {
       return { error: 'Error fetching Spotify metadata: ' + e.message };
@@ -331,8 +343,11 @@ export function createSources({ fetch: doFetch, httpJson, scraper, resolveMedia,
   // Deezer paginates through a 'next' link; follow it rather than guessing a limit.
   async function deezerPaged(url, maxPages = 20) {
     const out = [];
+    const seen = new Set();
     let next = url;
     for (let i = 0; i < maxPages && next; i++) {
+      if (seen.has(next)) break;
+      seen.add(next);
       const page = await httpJson(next);
       if (!page || !page.data || !page.data.length) break;
       out.push(...page.data);
@@ -353,17 +368,31 @@ export function createSources({ fetch: doFetch, httpJson, scraper, resolveMedia,
       const title = meta.title || name || 'Deezer Playlist';
       const cover = image || meta.picture_xl || meta.picture_big || meta.cover_xl || '';
       const group = {
-        id: 'deezer-' + Date.now(),
+        id: `deezer-${type}-${id}`,
         name: title,
         folderName: sanitizeFolder(title),
         artworkUrl: cover,
+        service: 'deezer',
       };
       log('source.deezer', { name: title, tracks: rows.length });
       return {
         name: title,
         group,
+        // The album title rides along where Deezer gives us one. It is what the
+        // search-variant builder needs for its disambiguate-by-album wording,
+        // which had nothing to work with because nothing on the import side ever
+        // carried an album. A playlist NAME is not an album and must not stand
+        // in for one - "Track Artist My Chill Mix" is a worse query, not a
+        // better one - so this is only ever the track's own.
         results: rows.map((t) => buildTrackResult(
-          t.title || '', t.artist?.name || '', deezerTrackCover(t), group)),
+          t.title || '', t.artist?.name || '', deezerTrackCover(t), group, 'qobuz',
+          {
+            service: 'deezer',
+            trackId: t.id ? String(t.id) : undefined,
+            isrc: t.isrc || undefined,
+            durationSec: t.duration || undefined,
+            album: (t.album && t.album.title) || (type === 'album' ? title : ''),
+          })),
       };
     } catch (e) {
       return { error: 'Deezer fetch failed: ' + e.message };
@@ -393,6 +422,35 @@ export function createSources({ fetch: doFetch, httpJson, scraper, resolveMedia,
     };
   }
 
+  async function spotifyTrack(url) {
+    try {
+      const data = await spotifyEmbedData(url);
+      const entity = data?.props?.pageProps?.state?.data?.entity;
+      const row = entity?.trackList?.[0] || entity;
+      const title = row?.title || row?.name;
+      const artist = row?.subtitle || entity?.artists?.map(a => a.name).filter(Boolean).join(', ') || '';
+      if (!title || !artist) return { error: 'Failed to extract that Spotify track.' };
+      const id = new URL(url).pathname.split('/').filter(Boolean).pop();
+      const cover = largestImage(entity?.visualIdentity?.image || entity?.coverArt?.sources);
+      const group = { id: `spotify-track-${id}`, name: title, folderName: sanitizeFolder(title), artworkUrl: cover, service: 'spotify' };
+      return { name: title, group, results: [buildTrackResult(title, artist, cover, group, 'qobuz', {
+        service: 'spotify', trackId: id, durationSec: (row.duration || entity.durationInMs) ? Math.round((row.duration || entity.durationInMs) / 1000) : undefined,
+      })] };
+    } catch (e) { return { error: 'Error fetching Spotify track: ' + e.message }; }
+  }
+
+  async function deezerTrack(id) {
+    try {
+      const row = await httpJson(`https://api.deezer.com/track/${id}`);
+      if (!row?.title || !row.artist?.name || row.error) return { error: 'Could not read that Deezer track.' };
+      const cover = deezerTrackCover(row);
+      const group = { id: `deezer-track-${id}`, name: row.title, folderName: sanitizeFolder(row.title), artworkUrl: cover, service: 'deezer' };
+      return { name: row.title, group, results: [buildTrackResult(row.title, row.artist.name, cover, group, 'qobuz', {
+        service: 'deezer', trackId: String(row.id || id), isrc: row.isrc, album: row.album?.title, durationSec: row.duration,
+      })] };
+    } catch (e) { return { error: 'Error fetching Deezer track: ' + e.message }; }
+  }
+
 
   // The only flow that needs a real browser page: Spotify's profile grid is
   // rendered client-side and lazy-loads against a bottom sentinel.
@@ -414,7 +472,15 @@ export function createSources({ fetch: doFetch, httpJson, scraper, resolveMedia,
     // The avatar comes off the same page render as the grid, so it costs no
     // extra request - the old code simply threw the header away and left the
     // profile card showing a placeholder for a picture already on screen.
-    const header = res.profile || {};
+    let header = res.profile || {};
+    // /playlists is a separate shelf page in newer Spotify builds. The user's
+    // avatar lives on /user/:id, so do not substitute a playlist card image.
+    if (!header.image) {
+      try {
+        const root = await scraper.run('https://open.spotify.com/user/' + encodeURIComponent(user), SPOTIFY_PROFILE_HEADER, SPOTIFY_DESKTOP_UA);
+        header = { ...header, ...root, name: root?.name || header.name };
+      } catch { /* keep a usable playlist import if the header cannot load */ }
+    }
     return {
       profile: {
         service: 'spotify',
@@ -427,108 +493,61 @@ export function createSources({ fetch: doFetch, httpJson, scraper, resolveMedia,
     };
   }
 
-  /**
-   * A SoundCloud or YouTube link, resolved through yt-dlp in the main process.
-   *
-   * Every track keeps the URL of the exact upload it came from, which is the
-   * point: the chain can fetch THAT file rather than searching for a name that
-   * can only ever be a worse guess at what the user already pointed at. The
-   * search stages still sit behind it, so a private or geo-blocked upload falls
-   * through to the stores instead of failing the track outright.
-   */
-  async function mediaLink(url, opts = {}) {
-    if (!resolveMedia) return { error: 'Reading that link needs the desktop app.' };
-    return cached(`media:${opts.perTrackArtwork ? 'art' : 'plain'}:${url}`, () => readMediaLink(url, opts));
-  }
-
-  async function readMediaLink(url, opts) {
-    const status = opts.onStatus || (() => {});
-    status('Reading the link…');
-    const out = await resolveMedia(url);
-    if (!out || out.error) return { error: (out && out.error) || 'Could not read that link.' };
-
-    const entries = out.entries || [];
-    if (!entries.length) return { error: 'No tracks behind that link.' };
-
-    const isSet = out.kind === 'playlist';
-    const name = out.title || (isSet ? 'Playlist' : entries[0].title) || 'Playlist';
-    // A single track goes to a folder named after the track's own artist, not
-    // after the track: a folder per song would litter the library.
-    const first = splitUploadTitle(entries[0]);
-    const folderTitle = isSet ? name : (first.artist || out.uploader || name);
-
-    // yt-dlp's --flat-playlist gives a SoundCloud row neither a thumbnail nor,
-    // inside a set, a title at all - only a permalink, so the rows arrive as
-    // slugs over placeholders. SoundCloud's public oEmbed endpoint answers with
-    // both for one request per row: the same trade already made for Spotify
-    // track artwork, opt-in for the same reason.
-    const thin = (e) => (!e.thumbnail || e.titleGuess) && /soundcloud\.com|snd\.sc/i.test(e.url || '');
-    if (opts.perTrackArtwork && httpJson && entries.some(thin)) {
-      status('Fetching track details…');
-      await mapPool(entries, ART_POOL, async (e) => {
-        if (!thin(e)) return;
-        try {
-          const d = await httpJson('https://soundcloud.com/oembed?format=json&url=' + encodeURIComponent(e.url));
-          if (!d) return;
-          if (d.thumbnail_url && !e.thumbnail) e.thumbnail = d.thumbnail_url;
-          if (!e.uploader && d.author_name) e.uploader = String(d.author_name).trim();
-          // oEmbed titles read "Artist - Title by Account"; the trailing account
-          // is the uploader, which splitUploadTitle would otherwise take for
-          // half of the name.
-          if (d.title && e.titleGuess) {
-            const author = String(d.author_name || '').trim();
-            let t = String(d.title).trim();
-            if (author && t.toLowerCase().endsWith((' by ' + author).toLowerCase())) {
-              t = t.slice(0, -(author.length + 4)).trim();
-            }
-            if (t) { e.title = t; e.titleGuess = false; }
-          }
-        } catch (err) { /* a slug over a placeholder is still a usable row */ }
-      });
-    }
-
-    const group = {
-      id: 'media-' + Date.now(),
-      name: isSet ? name : folderTitle,
-      folderName: sanitizeFolder(folderTitle),
-      artworkUrl: out.thumbnail || entries[0].thumbnail || '',
-    };
-    log('source.media', { host: (url.split('/')[2] || ''), kind: out.kind, tracks: entries.length });
-
-    return {
-      name: group.name,
-      group,
-      results: entries.map((e) => {
-        const { title, artist } = splitUploadTitle(e);
-        return buildTrackResult(title, artist, e.thumbnail, group, 'qobuz', {
-          mediaUrl: e.url,
-          durationSec: e.durationSec || null,
-          isSet: !!e.isSet,
-        });
-      }),
-    };
+  async function mediaLink(_url, _opts = {}) {
+    return { error: 'YouTube and SoundCloud downloads are disabled. Only FLAC sources are supported.' };
   }
 
   /** One entry point: hand it whatever the user pasted. */
   async function resolve(input, opts = {}) {
     const c = classifyInput(input, opts.mode);
     switch (c.kind) {
+      case 'spotify-track': return { ...(await spotifyTrack(c.url)), kind: c.kind };
+      case 'deezer-track': return { ...(await deezerTrack(c.id)), kind: c.kind };
       case 'spotify-playlist': return { ...(await spotifyPlaylist(c.url, opts)), kind: c.kind };
       case 'deezer-playlist':  return { ...(await deezerPlaylist(c)), kind: c.kind };
       case 'media-link':       return { ...(await mediaLink(c.url, opts)), kind: c.kind };
       case 'profile':          return { ...c, kind: 'profile' };
       case 'text':             return { kind: 'text', text: c.text };
       case 'empty':            return { error: 'Nothing to import.' };
-      default:                 return { error: 'That link is not a Spotify, Deezer or SoundCloud one.' };
+      default:                 return { error: 'That link is not a Spotify or Deezer link.' };
     }
   }
 
   return {
     resolve, classifyInput,
-    spotifyPlaylist, deezerPlaylist, mediaLink,
+    spotifyPlaylist, deezerPlaylist, spotifyTrack, deezerTrack, mediaLink,
+    spotifyTrackArtwork,
     spotifyProfilePlaylists, deezerProfilePlaylists,
   };
 }
+
+// The root user page carries the avatar; its /playlists subpage may not.
+export const SPOTIFY_PROFILE_HEADER = `
+  new Promise((resolve) => {
+    const read = () => {
+      const meta = (prop) => document.querySelector('meta[property="' + prop + '"]')?.getAttribute('content') || '';
+      const header = document.querySelector('[data-testid="entity-header"], .main-entityHeader-container');
+      const avatar = document.querySelector('img[data-testid="user-image"]')
+        || header?.querySelector('figure img, img');
+      let image = avatar?.currentSrc || avatar?.src || '';
+      if (!image) {
+        const figure = document.querySelector('[data-testid="user-image"]') || header?.querySelector('figure > div');
+        const bg = figure ? getComputedStyle(figure).backgroundImage : '';
+        if (bg?.startsWith('url(')) image = bg.slice(4, -1).replace(/["']/g, '').trim();
+      }
+      if (!image || image.startsWith('data:')) image = meta('og:image');
+      const name = (header?.querySelector('h1')?.innerText || meta('og:title').split('|')[0]).trim();
+      return { name, image };
+    };
+    let polls = 0;
+    const first = read();
+    if (first.image) { resolve(first); return; }
+    const timer = setInterval(() => {
+      const profile = read();
+      if (profile.image || ++polls >= 20) { clearInterval(timer); resolve(profile); }
+    }, 500);
+  });
+`;
 
 // Injected into the Spotify profile page. Deliberately free of backslashes: this
 // is a template literal, so every one would have to be doubled, and node --check
@@ -537,7 +556,7 @@ export const SPOTIFY_PROFILE_SCRAPE = `
   new Promise((resolve) => {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const shelf = () => document.querySelector('section[data-testid="component-shelf"][aria-label="Public Playlists"]');
-    const anchors = () => Array.from((shelf() || document.body).querySelectorAll('a[href^="/playlist/"]'));
+    const anchors = () => Array.from((shelf() || document.body).querySelectorAll('a[href*="/playlist/"]'));
 
     (async () => {
       // the consent dialog sits over the grid and stops it rendering

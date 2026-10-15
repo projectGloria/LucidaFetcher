@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { joinFolder, sortPlaylists, PROFILE_ORDERS, SPOTIFY_PROFILE_SCRAPE } from '../src/engine/sources.mjs';
+import { joinFolder, sortPlaylists, PROFILE_ORDERS, SPOTIFY_PROFILE_SCRAPE, SPOTIFY_PROFILE_HEADER } from '../src/engine/sources.mjs';
+import { runScript } from './fake-dom.mjs';
 import { collectProfiles, reportPayload, profileSignature } from '../src/engine/profile-report.mjs';
 
 const grid = [
@@ -149,4 +150,13 @@ test('the scrape reports a profile header alongside the playlists', () => {
   // what the page script actually resolves with.
   assert.match(SPOTIFY_PROFILE_SCRAPE, /profile: profile/);
   assert.match(SPOTIFY_PROFILE_SCRAPE, /og:image/);
+});
+
+test('main profile header reads its avatar metadata without reading a playlist card', async () => {
+  const result = await runScript(SPOTIFY_PROFILE_HEADER, { document: { querySelector: selector => {
+    if (selector === 'meta[property="og:image"]') return { getAttribute: () => 'https://i.scdn.co/avatar.jpg' };
+    if (selector === 'meta[property="og:title"]') return { getAttribute: () => 'Nihil | Spotify' };
+    return null;
+  } } });
+  assert.deepEqual(result, { name: 'Nihil', image: 'https://i.scdn.co/avatar.jpg' });
 });

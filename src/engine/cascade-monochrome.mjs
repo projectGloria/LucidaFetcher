@@ -20,8 +20,8 @@
 import { injectableScorer, MIN_TITLE_SCORE } from './matching.mjs';
 
 export const MONOCHROME_FIND_POLLS = 60;        // 500ms each - waiting for the SPA to render cards
-export const MONOCHROME_CANDIDATE_POLLS = 75;   // 1s each - stream resolve + remux, PER candidate
-export const MONOCHROME_TOTAL_POLLS = 210;      // 1s each - overall ceiling across all candidates
+export const MONOCHROME_CANDIDATE_POLLS = 30;   // 1s each - stream resolve + remux, PER candidate
+export const MONOCHROME_TOTAL_POLLS = 90;       // 1s each - overall ceiling across all candidates
 export const MONOCHROME_MAX_CANDIDATES = 4;     // how far down the ranking to walk
 
 export function buildMonochromeScript(expected, opts = {}) {
@@ -102,6 +102,15 @@ ${injectableScorer(expected, opts.minTitleScore ?? MIN_TITLE_SCORE)}
         undo.push(() => observer.disconnect());
       };
       watchNotices();
+      if (document.body && typeof MutationObserver === 'function') {
+        const bodyObserver = new MutationObserver(() => {
+          if (!watched && document.getElementById('download-notifications')) {
+            watchNotices();
+          }
+        });
+        bodyObserver.observe(document.body, { childList: true, subtree: true });
+        undo.push(() => bodyObserver.disconnect());
+      }
       const errorNotice = () => {
         watchNotices();
         if (latchedError) return latchedError;
@@ -201,7 +210,7 @@ ${injectableScorer(expected, opts.minTitleScore ?? MIN_TITLE_SCORE)}
           const title = clean(card.querySelector('.track-item-details .title'));
           if (!title) continue;
           const artist = cleanArtist(card.querySelector('.track-item-details .artist'));
-          const s = score(title, artist);
+          const s = score(title, artist, durationOf(card.querySelector('.duration, .track-duration, .track-item-duration, [data-duration]')));
           scored.push({ el: card, title, artist, s, acceptable: isAcceptable(s, MIN_TITLE_SCORE) });
         }
         scored.sort((x, y) => (y.s.a - x.s.a) || (y.s.t - x.s.t) || (y.s.p - x.s.p));

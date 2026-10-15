@@ -282,6 +282,10 @@ body {
 .pill.live .dot { animation: pulse 1.6s ease-in-out infinite; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .28; } }
 
+/* A search that has been on the same source a while - still working, not
+   frozen, but worth calling out so it doesn't read as a hang. */
+.pill.slow     { background: var(--warn-soft); color: var(--warn); }
+
 .progress { height: 3px; background: var(--border-soft); border-radius: var(--r-pill); overflow: hidden; }
 .progress > i {
   display: block; height: 100%; border-radius: inherit;
@@ -372,6 +376,10 @@ body {
 }
 .row .status.err { color: var(--danger); }
 .row .status.warnc { color: var(--warn); }
+.row .status > .truncate { flex: 1; min-width: 0; }
+.row .status .elapsed {
+  flex: none; color: var(--warn); font-variant-numeric: tabular-nums;
+}
 .row .bar { grid-column: 2 / -1; margin-top: 6px; }
 .row .actions { display: flex; gap: 2px; opacity: 0; transition: opacity var(--fast); }
 .row:hover .actions, .row:focus-within .actions { opacity: 1; }
@@ -598,6 +606,8 @@ body {
   color: #fff; background: rgba(18,21,32,.9);
   box-shadow: 0 1px 6px rgba(0,0,0,.3); font-size: 9.5px; font-weight: 650;
 }
+.source-badge.flac { background: rgba(0, 150, 220, .92); }
+.source-badge.album { background: rgba(99, 102, 241, .92); }
 .source-badge.youtube { background: rgba(220,30,30,.9); }
 .source-badge.soundcloud { background: rgba(255,85,0,.92); }
 .media-details,

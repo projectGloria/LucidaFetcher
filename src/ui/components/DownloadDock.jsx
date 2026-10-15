@@ -1,5 +1,5 @@
 import { useRef } from 'react';
-import { useItems } from '../engine.js';
+import { useItems, useTransferProgress } from '../engine.js';
 
 // One panel at the bottom of the window for whatever is transferring right now.
 //
@@ -19,7 +19,8 @@ function fmtBytes(n, digits) {
 }
 
 export default function DownloadDock() {
-  const items = useItems();
+  useTransferProgress();
+  const items = [...new Map(useItems().map(rec => [rec.item.id, rec])).values()];
   // Byte counters are cumulative, so a rate has to be derived from two
   // readings. They live in a ref because they are display detail: as state they
   // would re-render the dock on their own account as well as on every progress

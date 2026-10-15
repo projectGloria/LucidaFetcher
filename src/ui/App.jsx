@@ -17,6 +17,8 @@ export default function App() {
   const [view, setView] = useState('queue');
   const [config, setConfig] = useState(null);
   const [ready, setReady] = useState(false);
+  const [bootError, setBootError] = useState(null);
+  const [throttleOff, setThrottleOff] = useState(false);
   const [toasts, setToasts] = useState([]);
 
   const toast = (text, kind) => {
@@ -40,10 +42,32 @@ export default function App() {
         log: (evt, data) => isElectron && ipc.send('log', { evt, data }),
       });
       if (!cancelled) setReady(true);
-    })();
+    })().catch((err) => {
+      // Without this, anything thrown while the engine is starting left the app
+      // on "Starting the download engine…" for ever - no error, no retry, and
+      // nothing on screen from the one app that logs everything.
+      console.error('[boot] engine failed to start:', err);
+      if (!cancelled) setBootError(err);
+    });
     return () => { cancelled = true; };
   }, []);
 
+  // The speed limiter switches itself off when a server will not honour a range
+  // request, because the alternative is a transfer that restarts for ever. Main
+  // has always announced that; nothing in the React UI listened, so the limit
+  // silently stopped applying and Settings went on showing the value it was set
+  // to - for the rest of the session and every download in it.
+  useEffect(() => {
+    if (!isElectron) return undefined;
+    const onUnsupported = () => {
+      setThrottleOff(true);
+      toast('Speed limit turned off — this server restarts the transfer when it is paused.', 'err');
+    };
+    ipc.on('throttle-unsupported', onUnsupported);
+    return () => ipc.removeListener('throttle-unsupported', onUnsupported);
+  }, []);
+
+  if (bootError) return <BootFailure error={bootError} />;
   if (!ready || !config) return <Splash />;
 
   return (
@@ -53,7 +77,9 @@ export default function App() {
       <main className="main">
         {view === 'queue' && <QueueView onToast={toast} />}
         {view === 'add' && <AddView onToast={toast} />}
-        {view === 'settings' && <SettingsView config={config} setConfig={setConfig} onToast={toast} />}
+        {view === 'settings' && (
+          <SettingsView config={config} setConfig={setConfig} onToast={toast} throttleOff={throttleOff} />
+        )}
       </main>
       <DownloadDock />
       <div className="toast-host">
@@ -70,6 +96,31 @@ function Splash() {
     <div className="empty" style={{ height: '100%' }}>
       <div className="big">◍</div>
       <h3>Starting the download engine…</h3>
+    </div>
+  );
+}
+
+/**
+ * The engine did not start.
+ *
+ * Says what happened and offers the log, rather than leaving the splash up for
+ * ever - a startup failure is the one situation where the user cannot reach
+ * Settings to export a diagnostics report.
+ */
+function BootFailure({ error }) {
+  return (
+    <div className="empty" style={{ height: '100%' }}>
+      <div className="big">⚠</div>
+      <h3>The download engine could not start</h3>
+      <p style={{ color: 'var(--muted, #9aa1b8)', maxWidth: 460, textAlign: 'center' }}>
+        {String((error && error.message) || error)}
+      </p>
+      <div className="row-actions" style={{ marginTop: 16 }}>
+        <button className="btn" onClick={() => window.location.reload()}>Try again</button>
+        {isElectron && (
+          <button className="btn" onClick={() => ipc.invoke('open-log-folder')}>Open the log folder</button>
+        )}
+      </div>
     </div>
   );
 }
@@ -174,7 +225,8 @@ function Sidebar({ view, setView }) {
 // nothing running - and nothing held back by a pause - say so instead.
 function TransportControls({ paused, idle }) {
   const c = getController();
-  if (idle && !paused) {
+  const retrying = c.keepTrying && !c.retryStopped && c.stats.skipped > 0;
+  if (idle && !paused && !retrying) {
     return <div className="transport-idle">No downloads in progress</div>;
   }
   return (
@@ -186,6 +238,7 @@ function TransportControls({ paused, idle }) {
       >
         {paused ? '▶ Resume' : '❚❚ Pause'}
       </button>
+      <button className="btn btn-sm btn-danger" onClick={() => c.cancelAll()}>Cancel all</button>
     </div>
   );
 }

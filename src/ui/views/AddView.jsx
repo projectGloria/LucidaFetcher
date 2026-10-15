@@ -3,36 +3,38 @@ import { getController, isElectron, ipc, sources } from '../engine.js';
 import * as history from '../history.js';
 import { buildSearchVariants, buildSearchQuery } from '../../engine/variants.mjs';
 import { sanitizeFolder, joinFolder, sortPlaylists, PROFILE_ORDERS, mapPool } from '../../engine/sources.mjs';
+import { trackKey } from '../../engine/trackKey.mjs';
+import { playlistFileName } from '../../engine/profile-paths.mjs';
+import { refreshSpotifyArtwork } from '../../engine/spotify-artwork.mjs';
 
 let seq = 0;
 const MODES = [
-  { id: 'search', label: 'Search tracks', icon: '⌕' },
+  { id: 'search', label: 'Search music', icon: '⌕' },
   { id: 'link', label: 'Paste a link', icon: '↗' },
   { id: 'profile', label: 'Spotify profile', icon: '◎' },
   { id: 'history', label: 'History', icon: '⟲' },
 ];
 const DEMO_RESULTS = [
-  { title: 'After Dark', uploader: 'Mr.Kitty', durationSec: 259, url: 'https://www.youtube.com/watch?v=sVx1mJDeUjY', source: 'youtube' },
-  { title: 'After Dark (Official Audio)', uploader: 'Mr.Kitty Official', durationSec: 257, url: 'https://soundcloud.com/mrkittydm/after-dark', source: 'soundcloud' },
-  { title: 'After Dark x Sweater Weather', uploader: 'mashups', durationSec: 281, url: 'https://www.youtube.com/watch?v=example2', source: 'youtube' },
-  { title: 'After Dark — slowed', uploader: 'nightdrive', durationSec: 301, url: 'https://soundcloud.com/example/after-dark', source: 'soundcloud' },
+  { id: 'demo-1', title: 'After Dark', artist: 'Mr.Kitty', album: 'Time', durationSec: 259, source: 'flac', image: 'https://e-cdns-images.dzcdn.net/images/cover/b41a5fc5372ae6014e7a4627d758c5be/500x500-000000-80-0-0.jpg' },
+  { id: 'demo-2', title: 'Random Access Memories', artist: 'Daft Punk', isSet: true, deezerAlbumId: '6575789', trackCount: 13, source: 'flac', image: 'https://e-cdns-images.dzcdn.net/images/cover/311bba0fc112d15f72c8b5a65f0456c1/500x500-000000-80-0-0.jpg' },
+  { id: 'demo-3', title: 'Get Lucky (feat. Pharrell Williams & Nile Rodgers)', artist: 'Daft Punk', album: 'Random Access Memories', durationSec: 369, source: 'flac', image: 'https://e-cdns-images.dzcdn.net/images/cover/311bba0fc112d15f72c8b5a65f0456c1/500x500-000000-80-0-0.jpg' },
+  { id: 'demo-4', title: 'Instant Crush (feat. Julian Casablancas)', artist: 'Daft Punk', album: 'Random Access Memories', durationSec: 337, source: 'flac', image: 'https://e-cdns-images.dzcdn.net/images/cover/311bba0fc112d15f72c8b5a65f0456c1/500x500-000000-80-0-0.jpg' },
 ];
 
-function mediaService(url) {
-  if (/soundcloud\.com|snd\.sc/i.test(url || '')) return 'soundcloud';
-  if (/youtu\.?be/i.test(url || '')) return 'youtube';
-  return null;
-}
-
-function toQueueItem({ title, artist, image, folderName, group, mediaUrl, durationSec, profile }) {
+function toQueueItem({ title, artist, album, image, folderName, group, mediaUrl, durationSec, profile, service, originalService }) {
   return {
     id: `add-${Date.now()}-${seq++}`,
     title, artist,
+    // Carried so buildSearchVariants can build its disambiguate-by-album
+    // wording. Without it that variant collapsed into the lead-artist one and
+    // was dropped by the dedup filter, so one of the six documented search
+    // strategies had never once run.
+    album: album || null,
     name: `${artist || 'Unknown artist'} - ${title}`,
     image: image || null,
     folderName: folderName || null,
     mediaUrl: mediaUrl || null,
-    mediaService: mediaUrl ? mediaService(mediaUrl) : null,
+    mediaService: null,
     durationSec: durationSec || null,
     groupId: group ? group.id : null,
     groupName: group ? group.name : null,
@@ -48,9 +50,9 @@ function toQueueItem({ title, artist, image, folderName, group, mediaUrl, durati
     profileArtwork: profile ? profile.image : null,
     profileFolder: profile ? profile.folderName : null,
     profileOrder: profile ? profile.order : null,
-    originalService: 'qobuz',
+    originalService: originalService || service || (profile && profile.service) || (group && group.service) || 'deezer',
     searchQuery: buildSearchQuery(title, artist),
-    searchVariants: buildSearchVariants(title, artist),
+    searchVariants: buildSearchVariants(title, artist, album || ''),
     key: `${folderName || ''}|${title}|${artist}`.toLowerCase(),
   };
 }
@@ -61,25 +63,40 @@ function formatDuration(seconds) {
 }
 
 function artworkFor(result) {
-  if (result.thumbnail || result.image) return result.thumbnail || result.image;
-  const match = /[?&]v=([^&]+)/.exec(result.url || '');
-  return result.source === 'youtube' && match ? `https://i.ytimg.com/vi/${match[1]}/hqdefault.jpg` : null;
+  return result.thumbnail || result.image || null;
 }
 
 async function withoutExisting(items) {
-  if (!isElectron || !items.length) return { items, skipped: 0 };
+  if (!isElectron || !items.length) return { items, skipped: 0, guessed: 0 };
+  // Covers must also be restored when every audio file is already on disk.
+  const artwork = new Map();
+  for (const item of items) {
+    if (item.folderName && item.groupArtwork) artwork.set(item.folderName, item.groupArtwork);
+  }
+  for (const [folderName, url] of artwork) ipc.send('playlist-artwork-sync', { folderName, url });
   try {
-    const checks = await ipc.invoke('downloads-check', items.map((i) => ({ key: i.key, folderName: i.folderName, title: i.title })));
-    return { items: items.filter((_, i) => !(checks[i] && checks[i].done)), skipped: checks.filter((r) => r && r.done).length };
-  } catch { return { items, skipped: 0 }; }
+    const checks = await ipc.invoke('downloads-check', items.map((i) => ({ key: i.key, folderName: i.folderName, title: i.title, artist: i.artist, durationSec: i.durationSec, isrc: i.isrc })));
+    return {
+      items: items.filter((_, i) => !(checks[i] && checks[i].done)),
+      skipped: checks.filter((r) => r && r.done).length,
+      // A manifest hit is a fact - the app recorded that exact file. A SCAN hit
+      // is a guess from title tokens alone, with no artist check, so "Dark
+      // Essence (Remix).flac" satisfies a want of "Dark Essence". Both used to
+      // arrive as an identical `done: true` and the track just silently never
+      // appeared, which is the wrong way round: the guess is the one worth
+      // saying out loud.
+      guessed: checks.filter((r) => r && r.done && r.via === 'scan').length,
+    };
+  } catch { return { items, skipped: 0, guessed: 0 }; }
 }
 
 function EmptyArtwork({ kind = 'track' }) {
   return <div className="media-placeholder" aria-hidden="true">{kind === 'playlist' ? '♫' : '♪'}</div>;
 }
 
-function SourceBadge({ source }) {
-  return <span className={`source-badge ${source || ''}`}>{source === 'soundcloud' ? 'SoundCloud' : 'YouTube'}</span>;
+function SourceBadge({ isSet }) {
+  if (isSet) return <span className="source-badge album">FLAC · Album</span>;
+  return <span className="source-badge flac">FLAC</span>;
 }
 
 function TrackCard({ result, action, actionLabel = 'Add to queue', queued = false, disabled = false, onOpen }) {
@@ -90,8 +107,8 @@ function TrackCard({ result, action, actionLabel = 'Add to queue', queued = fals
     <div className="media-cover">
       {art ? <img src={art} alt="" loading="lazy" /> : <EmptyArtwork kind={isSet ? 'playlist' : 'track'} />}
       {length && <span className="duration">{length}</span>}
-      {isSet && <span className="set-badge">Album</span>}
-      {result.source && <SourceBadge source={result.source} />}
+      {isSet && <span className="set-badge">{result.trackCount ? `${result.trackCount} tracks` : 'Album'}</span>}
+      <SourceBadge isSet={isSet} />
     </div>
   );
   return (
@@ -101,7 +118,7 @@ function TrackCard({ result, action, actionLabel = 'Add to queue', queued = fals
         : cover}
       <div className="media-details">
         <h3 title={result.title}>{result.title}</h3>
-        <p title={result.uploader || result.artist}>{result.uploader || result.artist || 'Unknown artist'}</p>
+        <p title={result.artist || result.uploader}>{result.artist || result.uploader || 'Unknown artist'}{result.album ? ` · ${result.album}` : ''}</p>
         {isSet
           ? <div className="card-actions">
               <button className="btn card-action" onClick={onOpen} disabled={disabled}>⤢ Open</button>
@@ -128,7 +145,7 @@ function SetModal({ state, onClose, onQueueAll, onQueueOne, busy }) {
               ? <img src={state.preview?.group?.artworkUrl || state.image} alt="" />
               : <EmptyArtwork kind="playlist" />}
             <div>
-              <span className="eyebrow">{state.loading ? 'Reading…' : 'Album'}</span>
+              <span className="eyebrow">{state.loading ? 'Reading…' : 'FLAC Album'}</span>
               <h2>{state.preview?.name || state.title}</h2>
               {!state.loading && !state.error && <p>{rows.length} tracks</p>}
             </div>
@@ -144,7 +161,7 @@ function SetModal({ state, onClose, onQueueAll, onQueueOne, busy }) {
           {state.error && <div className="inline-empty"><strong>Could not open that album</strong><span>{state.error}</span></div>}
           {!state.loading && !state.error && <div className="media-grid">{rows.map((r, i) => (
             <TrackCard key={`${r.texts[0]}-${i}`} actionLabel="Add track" disabled={!!busy}
-              result={{ title: r.texts[0], artist: r.texts[1] || '', image: r.image, durationSec: r.durationSec }}
+              result={{ title: r.texts[0], artist: r.texts[1] || '', album: r.album || state.title, image: r.image, durationSec: r.durationSec, source: 'flac' }}
               action={() => onQueueOne(r)} />
           ))}</div>}
         </div>
@@ -224,26 +241,31 @@ export default function AddView({ onToast }) {
   useSyncExternalStore(history.subscribe, history.getSnapshot);
   const entries = history.list();
 
-  const resultKey = (r) => r.url || `${r.title}|${r.uploader || r.artist}`;
+  const resultKey = (r) => (r.isSet ? 'album:' : 'track:') + (r.id || r.url || `${r.title}|${r.artist || r.uploader}`);
   const safeFolder = folder.trim() ? sanitizeFolder(folder.trim()) : null;
 
   const queueItems = async (items, label, quiet = false) => {
-    const { items: keep, skipped } = await withoutExisting(items);
+    const { items: keep, skipped, guessed } = await withoutExisting(items);
     const controller = getController();
     const n = controller.add(keep);
     const dupes = (controller.lastAdd && controller.lastAdd.duplicates) || 0;
     // Worth saying out loud: a playlist that lists a track twice looks like the
     // app lost tracks unless the collapse is reported.
     const dupeNote = dupes ? ` ${dupes} duplicate${dupes === 1 ? '' : 's'} collapsed.` : '';
+    // A scan match is a guess, so it is named as one - otherwise a track the
+    // folder scan mistook for another simply never appears and nothing says why.
+    const guessNote = guessed
+      ? ` ${guessed} matched a similarly named file already in the folder.`
+      : '';
     if (quiet) return n;
     if (n === 1) {
       const item = keep[0];
-      onToast(`Added “${item.title}”${item.artist ? ` by ${item.artist}` : ''} to the queue.${dupeNote}`);
+      onToast(`Added “${item.title}”${item.artist ? ` by ${item.artist}` : ''} to the queue.${dupeNote}${guessNote}`);
     } else if (n > 1) {
-      onToast(`Added ${n} tracks${label ? ` from ${label}` : ''} to the queue.${dupeNote}`);
+      onToast(`Added ${n} tracks${label ? ` from ${label}` : ''} to the queue.${dupeNote}${guessNote}`);
     }
     else if (dupes) onToast(`Already queued.${dupeNote}`);
-    else if (skipped) onToast(`${skipped === 1 ? 'That track is' : 'Those tracks are'} already downloaded.`);
+    else if (skipped) onToast(`${skipped === 1 ? 'That track is' : 'Those tracks are'} already downloaded.${guessNote}`);
     else onToast('Nothing new was added.');
     return n;
   };
@@ -252,7 +274,7 @@ export default function AddView({ onToast }) {
     event.preventDefault();
     const q = query.trim();
     if (!q || busy) return;
-    setBusy('Searching YouTube and SoundCloud…');
+    setBusy('Searching FLAC tracks and albums…');
     setSearchState('loading');
     setResults([]);
     setQueued(new Set());
@@ -263,22 +285,45 @@ export default function AddView({ onToast }) {
         setSearchState('done');
         return;
       }
-      const [yt, sc] = await Promise.all([
-        ipc.invoke('yt-search', { query: q, limit: 8 }),
-        ipc.invoke('sc-search', { query: q, limit: 8 }),
+      const [tracksRes, albumsRes] = await Promise.all([
+        ipc.invoke('http-json', `https://api.deezer.com/search?q=${encodeURIComponent(q)}&limit=15`),
+        ipc.invoke('http-json', `https://api.deezer.com/search/album?q=${encodeURIComponent(q)}&limit=6`),
       ]);
-      const found = [
-        ...((yt?.ok ? yt.results : []) || []).map((r) => ({ ...r, source: 'youtube' })),
-        ...((sc?.ok ? sc.results : []) || []).map((r) => ({ ...r, source: 'soundcloud' })),
-      ];
-      const unique = [...new Map(found.map((r) => [resultKey(r), r])).values()];
-      setResults(unique);
+
+      const albums = ((albumsRes && albumsRes.data) || []).map((a) => ({
+        id: String(a.id),
+        deezerAlbumId: String(a.id),
+        title: a.title,
+        artist: a.artist?.name || '',
+        image: a.cover_xl || a.cover_big || a.cover_medium || a.cover || '',
+        isSet: true,
+        trackCount: a.nb_tracks || 0,
+        source: 'flac',
+      }));
+
+      const tracks = ((tracksRes && tracksRes.data) || []).map((t) => ({
+        id: String(t.id),
+        title: t.title,
+        artist: t.artist?.name || '',
+        album: t.album?.title || '',
+        image: t.album?.cover_xl || t.album?.cover_big || t.album?.cover_medium || t.album?.cover || '',
+        durationSec: t.duration || null,
+        isSet: false,
+        source: 'flac',
+      }));
+
+      const combined = [...albums, ...tracks];
+      setResults(combined);
       setSearchState('done');
-      if (unique.length) {
-        history.remember({ kind: 'search', label: q, name: q, count: unique.length,
-                   image: artworkFor(unique[0]) || '', results: unique, folder: safeFolder });
+      if (combined.length) {
+        history.remember({
+          kind: 'search', label: q, name: q, count: combined.length,
+          image: combined[0]?.image || '', results: combined, folder: safeFolder
+        });
       }
-      if (!unique.length && (!yt?.ok || !sc?.ok)) onToast('Search providers are unavailable right now. Try again in a moment.', 'err');
+      if (!combined.length && (!tracksRes || !albumsRes)) {
+        onToast('Search provider is unavailable right now. Try again in a moment.', 'err');
+      }
     } catch (error) {
       setSearchState('error');
       onToast(error.message || 'Search failed.', 'err');
@@ -286,9 +331,18 @@ export default function AddView({ onToast }) {
   };
 
   const addSearchResult = async (result) => {
+    if (result.isSet) {
+      await queueSet(result);
+      setQueued((prev) => new Set(prev).add(resultKey(result)));
+      return;
+    }
     const item = toQueueItem({
-      title: result.title, artist: result.uploader || result.artist || '', image: artworkFor(result),
-      folderName: safeFolder, mediaUrl: result.url, durationSec: result.durationSec,
+      title: result.title,
+      artist: result.artist || result.uploader || '',
+      album: result.album,
+      image: artworkFor(result),
+      folderName: safeFolder,
+      durationSec: result.durationSec,
     });
     if (await queueItems([item], null)) setQueued((prev) => new Set(prev).add(resultKey(result)));
   };
@@ -319,7 +373,7 @@ export default function AddView({ onToast }) {
       return;
     }
     await queueItems(tracks.map((r) => toQueueItem({
-      title: r.texts[0], artist: r.texts[1] || '', image: r.image,
+      title: r.texts[0], artist: r.texts[1] || '', album: r.album, image: r.image,
       folderName: preview.group.folderName, group: preview.group, mediaUrl: r.mediaUrl, durationSec: r.durationSec,
     })), preview.name);
     if (sets.length) onToast(`${sets.length} album${sets.length > 1 ? 's were' : ' was'} skipped — open one to add its tracks.`);
@@ -348,10 +402,14 @@ export default function AddView({ onToast }) {
     finally { setBusy(null); }
   };
 
-  // Reading one playlist of a profile. Deliberately WITHOUT per-track artwork:
-  // that is one extra request per track, and a profile multiplies it by every
-  // playlist it holds - the playlist cover is what ends up in cover.jpg anyway.
-  const readPlaylist = (playlist, perTrackArtwork = false) => (
+  // Reading one playlist of a profile. Deezer's own playlist rows already carry
+  // each track's real album art at no extra cost (deezerPlaylist uses it
+  // unconditionally), so only Spotify pays for this: one extra request per
+  // track, multiplied by every playlist a profile holds. Worth it anyway - the
+  // dock and queue otherwise show the same playlist cover for every row, which
+  // reads as "this app doesn't know what it's downloading" - so the playlist
+  // read concurrency below is halved to keep the total request burst sane.
+  const readPlaylist = (playlist, perTrackArtwork = true) => (
     playlist.service === 'deezer'
       ? sources.deezerPlaylist({ id: playlist.id, type: 'playlist', name: playlist.name, image: playlist.image })
       : sources.spotifyPlaylist(`https://open.spotify.com/playlist/${playlist.id}`, {
@@ -378,60 +436,137 @@ export default function AddView({ onToast }) {
    * read; and a run that queues as it goes would start downloading in the grid's
    * order and then contradict itself halfway through when the sort landed.
    */
+  const readOne = async (playlist, failed) => {
+    let out = null;
+    // Read all playlist metadata before requesting hundreds of track covers.
+    try { out = await readPlaylist(playlist, false); }
+    catch (e) { out = { error: e.message }; }
+    if (!out || out.error) {
+      const reason = (out && out.error) || 'unreadable';
+      failed.push({ playlist, error: reason });
+      console.error(`profile playlist read failed: ${playlist.name || playlist.id} — ${reason}`);
+      return null;
+    }
+    return out;
+  };
+
   const downloadProfile = async () => {
     if (!profile || busy) return;
     const info = profile.info || { service: profile.service, user: profile.user, name: profile.user };
     const meta = profileMeta(info);
     const list = profile.playlists;
-    let read = 0;
-    setBusy(`Reading ${list.length} playlists…`);
-
     const failed = [];
-    const resolved = await mapPool(list, 4, async (playlist) => {
-      let out = null;
-      try { out = await readPlaylist(playlist); }
-      catch (e) { out = { error: e.message }; }
-      read++;
-      setBusy(`Reading playlists… ${read} of ${list.length}`);
-      if (!out || out.error) { failed.push({ playlist, error: (out && out.error) || 'unreadable' }); return null; }
-      return { playlist, out };
-    });
+    let readCount = 0;
+    setBusy(`Reading playlists (0 of ${list.length})…`);
+    const readPlaylists = (await mapPool(list, 2, async playlist => {
+      const out = await readOne(playlist, failed);
+      setBusy(`Reading playlists (${++readCount} of ${list.length})…`);
+      return out ? { playlist, out } : null;
+    })).filter(Boolean);
 
-    const usable = resolved.filter(Boolean);
-    if (!usable.length) {
-      onToast(`Could not read any of ${info.name || info.user}'s playlists.`, 'err');
+    if (!readPlaylists.length) {
+      console.error(`profile read: 0/${list.length} playlists usable for ${info.name || info.user}`, failed);
+      onToast(`Could not read any of ${info.name || info.user}'s playlists. ${failed[0]?.error || ''}`, 'err');
       setBusy(null);
       return;
     }
 
-    // Sorted on the counts that were just measured, not on the grid's guess.
-    const ordered = sortPlaylists(
-      usable.map((u) => ({ ...u.playlist, tracks: u.out.results.length, _read: u })),
-      order,
-    );
+    const ordered = order === 'default'
+      ? readPlaylists
+      : sortPlaylists(
+          readPlaylists.map((r) => ({ ...r.playlist, tracks: r.out.results.length, _read: r })),
+          order,
+        ).map((r) => r._read);
 
-    setBusy(`Queueing ${ordered.length} playlists…`);
-    let queued = 0;
-    for (const row of ordered) {
-      const { out } = row._read;
-      const group = {
-        ...out.group,
-        // The group folder is the playlist's folder INSIDE the user's folder,
-        // which is the whole point of downloading a profile rather than forty
-        // playlists by hand.
-        folderName: joinFolder(meta.folderName, out.group.folderName),
+    setBusy(`Deduplicating and preparing ${ordered.length} playlists…`);
+
+    const playlists = [];
+    const tracksMap = new Map();
+    let totalPlaylistEntries = 0;
+
+    for (const item of ordered) {
+      const out = item.out;
+      const plId = `${meta.id}|${out.group?.id || item.playlist.id}`;
+      const plName = out.name || item.playlist.name || 'Playlist';
+      const plRecord = {
+        id: plId,
+        name: plName,
+        file: playlistFileName(plName, plId),
+        artwork: out.group?.artworkUrl || item.playlist.image || null,
+        folderName: joinFolder(meta.folderName, 'Playlists'),
+        trackKeys: [],
       };
-      queued += await queueItems(out.results.map((r) => toQueueItem({
-        title: r.texts[0], artist: r.texts[1] || '', image: r.image,
-        folderName: group.folderName, group, profile: meta,
-      })), null, true);
+
+      for (const r of (out.results || [])) {
+        totalPlaylistEntries++;
+        let key;
+        try {
+          key = trackKey({
+            isrc: r.isrc,
+            service: r.service || meta.service,
+            trackId: r.trackId,
+            title: r.texts[0],
+            artist: r.texts[1] || '',
+          });
+        } catch {
+          continue;
+        }
+
+        plRecord.trackKeys.push(key);
+        if (!tracksMap.has(key)) {
+          tracksMap.set(key, {
+            title: r.texts[0],
+            artist: r.texts[1] || '',
+            album: r.album || null,
+            image: r.image,
+            artworkPending: r.artworkPending,
+            durationSec: r.durationSec,
+            service: r.service || meta.service,
+            trackId: r.trackId,
+            isrc: r.isrc,
+            folderName: `${meta.folderName}/Tracks`,
+          });
+        }
+      }
+
+      playlists.push(plRecord);
     }
 
+    // Check existing library on disk to avoid re-downloading
+    if (isElectron && ipc) {
+      try {
+        const existingLib = await ipc.invoke('profile-library-load', meta.folderName);
+        if (existingLib && existingLib.tracks) {
+          for (const [k, prev] of Object.entries(existingLib.tracks)) {
+            if (tracksMap.has(k) && prev.status === 'downloaded' && prev.file) {
+              const current = tracksMap.get(k);
+              tracksMap.set(k, {
+                ...current,
+                status: 'downloaded',
+                file: prev.file,
+                bytes: prev.bytes,
+                savePath: prev.savePath,
+              });
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('Could not read existing library manifest:', e);
+      }
+    }
+
+    const queuedTracks = getController().addProfile(meta, playlists, tracksMap);
     setBusy(null);
+    refreshSpotifyArtwork(getController(), sources).catch(error => console.warn('Artwork refresh failed:', error.message));
+
     const note = failed.length ? ` ${failed.length} playlist${failed.length === 1 ? '' : 's'} could not be read.` : '';
-    onToast(queued
-      ? `Queued ${queued} track${queued === 1 ? '' : 's'} from ${ordered.length} of ${info.name || info.user}'s playlists.${note}`
-      : `Nothing new to download from ${info.name || info.user}.${note}`, queued ? undefined : 'err');
+    const dedupedCount = totalPlaylistEntries - tracksMap.size;
+    const dedupNote = dedupedCount > 0 ? ` (${dedupedCount} duplicate${dedupedCount === 1 ? '' : 's'} skipped)` : '';
+
+    onToast(
+      `Queued ${queuedTracks} unique track${queuedTracks === 1 ? '' : 's'} across ${playlists.length} playlists${dedupNote}.${note}`,
+      queuedTracks ? undefined : 'err'
+    );
   };
 
 
@@ -492,14 +627,22 @@ export default function AddView({ onToast }) {
   };
 
   const openSet = async (row) => {
-    if (!row.mediaUrl) return;
+    if (!row.mediaUrl && !row.deezerAlbumId && !row.id) return;
     setSetModal({ title: row.title, image: row.image, loading: true });
     try {
-      const out = await sources.resolve(row.mediaUrl, { mode: 'auto', perTrackArtwork: true });
+      let out;
+      if (row.deezerAlbumId || (row.isSet && row.id)) {
+        const albumId = row.deezerAlbumId || row.id;
+        out = await sources.deezerPlaylist({ id: albumId, type: 'album', name: row.title, image: row.image });
+      } else {
+        out = await sources.resolve(row.mediaUrl, { mode: 'auto', perTrackArtwork: true });
+      }
       if (out.error) { setSetModal({ title: row.title, image: row.image, error: out.error }); return; }
       setSetModal({ title: row.title, image: row.image, preview: out });
-      history.remember({ kind: 'link', label: row.mediaUrl, name: out.name, count: out.results.length,
-                 image: out.group?.artworkUrl || row.image || '' });
+      if (row.mediaUrl) {
+        history.remember({ kind: 'link', label: row.mediaUrl, name: out.name, count: out.results.length,
+                   image: out.group?.artworkUrl || row.image || '' });
+      }
     } catch (error) {
       setSetModal({ title: row.title, image: row.image, error: error.message || 'Could not read that album.' });
     }
@@ -508,17 +651,26 @@ export default function AddView({ onToast }) {
   // An album card can go straight to the queue: the resolve behind it is the
   // same cached one the pop-up uses, so this costs a request only the first time.
   const queueSet = async (row) => {
-    if (!row.mediaUrl) return;
+    if (!row.mediaUrl && !row.deezerAlbumId && !row.id) return;
     setBusy(`Reading “${row.title}”…`);
     try {
-      const out = await sources.resolve(row.mediaUrl, { mode: 'auto', perTrackArtwork: true, onStatus: setBusy });
+      let out;
+      if (row.deezerAlbumId || (row.isSet && row.id)) {
+        const albumId = row.deezerAlbumId || row.id;
+        out = await sources.deezerPlaylist({ id: albumId, type: 'album', name: row.title, image: row.image });
+      } else {
+        out = await sources.resolve(row.mediaUrl, { mode: 'auto', perTrackArtwork: true, onStatus: setBusy });
+      }
       if (out.error) { onToast(out.error, 'err'); return; }
-      history.remember({ kind: 'link', label: row.mediaUrl, name: out.name, count: out.results.length,
-                 image: out.group?.artworkUrl || row.image || '' });
+      if (row.mediaUrl) {
+        history.remember({ kind: 'link', label: row.mediaUrl, name: out.name, count: out.results.length,
+                   image: out.group?.artworkUrl || row.image || '' });
+      }
       await queueItems(out.results.map((r) => toQueueItem({
         title: r.texts[0], artist: r.texts[1] || '', image: r.image,
-        folderName: out.group.folderName, group: out.group,
-        mediaUrl: r.mediaUrl, durationSec: r.durationSec,
+        folderName: out.group?.folderName, group: out.group,
+        album: out.name || row.title,
+        durationSec: r.durationSec,
       })), out.name);
     } catch (error) { onToast(error.message || 'Could not read that album.', 'err'); }
     finally { setBusy(null); }
@@ -526,19 +678,29 @@ export default function AddView({ onToast }) {
 
   const setModalItem = (r) => toQueueItem({
     title: r.texts[0], artist: r.texts[1] || '', image: r.image,
-    folderName: setModal.preview.group.folderName, group: setModal.preview.group,
-    mediaUrl: r.mediaUrl, durationSec: r.durationSec,
+    folderName: setModal.preview?.group?.folderName, group: setModal.preview?.group,
+    album: r.album || setModal.preview?.name || setModal.title,
+    durationSec: r.durationSec,
   });
 
   const previewTracks = useMemo(() => preview?.results?.map((r) => ({
-    title: r.texts[0], artist: r.texts[1] || '', image: r.image, durationSec: r.durationSec,
-    mediaUrl: r.mediaUrl, isSet: r.isSet,
+    ...r,
+    title: r.texts?.[0] || r.title || '',
+    artist: r.texts?.[1] || r.artist || '',
+    image: r.image,
+    durationSec: r.durationSec,
+    mediaUrl: r.mediaUrl,
+    isSet: r.isSet,
+    album: r.album || null,
+    id: r.id || null,
+    deezerAlbumId: r.deezerAlbumId || null,
+    trackCount: r.trackCount || null,
   })) || [], [preview]);
 
   return (
     <>
       <header className="topbar add-topbar">
-        <div><h1>Add music</h1><span className="topbar-subtitle">Find the right recording before it enters your queue</span></div>
+        <div><h1>Add music</h1><span className="topbar-subtitle">Find lossless recordings and albums before queueing</span></div>
         {busy && <><span className="spacer" /><span className="pill accent live"><span className="dot" />{busy}</span></>}
       </header>
 
@@ -550,19 +712,19 @@ export default function AddView({ onToast }) {
           </div>
 
           {mode === 'search' && <form className="discovery-form" onSubmit={search}>
-            <label htmlFor="track-search">Search by track, artist, or both</label>
+            <label htmlFor="track-search">Search song or album for lossless FLAC download</label>
             <div className="search-control"><span className="search-icon" aria-hidden="true">⌕</span>
-              <input id="track-search" className="input" autoFocus placeholder="Try “Mr.Kitty — After Dark”" value={query} onChange={(e) => setQuery(e.target.value)} />
+              <input id="track-search" className="input" autoFocus placeholder="Try “Daft Punk — Random Access Memories” or “After Dark”" value={query} onChange={(e) => setQuery(e.target.value)} />
               {query && <button type="button" className="clear-input" aria-label="Clear search" onClick={() => { setQuery(''); setResults([]); setSearchState('idle'); }}>×</button>}
               <button className="btn btn-primary search-button" disabled={!query.trim() || !!busy}>{searchState === 'loading' ? 'Searching…' : 'Search'}</button>
             </div>
-            <div className="form-foot"><span>Results from YouTube and SoundCloud</span><label className="folder-inline">Save to folder<input className="input" placeholder="Optional" value={folder} onChange={(e) => setFolder(e.target.value)} /></label></div>
+            <div className="form-foot"><span>Lossless FLAC results (songs & albums)</span><label className="folder-inline">Save to folder<input className="input" placeholder="Optional" value={folder} onChange={(e) => setFolder(e.target.value)} /></label></div>
           </form>}
 
           {mode === 'link' && <form className="discovery-form" onSubmit={importLink}>
             <label htmlFor="music-link">Playlist, album, or track link</label>
             <div className="search-control"><span className="search-icon" aria-hidden="true">↗</span>
-              <input id="music-link" className="input" autoFocus placeholder="Paste a Spotify, Deezer, SoundCloud, YouTube, or Lucida link" value={link} onChange={(e) => { setLink(e.target.value); setPreview(null); }} />
+              <input id="music-link" className="input" autoFocus placeholder="Paste a Spotify or Deezer link" value={link} onChange={(e) => { setLink(e.target.value); setPreview(null); }} />
               <button className="btn btn-primary search-button" disabled={!link.trim() || !!busy}>Preview</button>
             </div><div className="form-foot"><span>Nothing is queued until you review the tracks.</span></div>
           </form>}
@@ -576,13 +738,13 @@ export default function AddView({ onToast }) {
           </form>}
         </div>
 
-        {mode === 'search' && searchState === 'idle' && <div className="discovery-empty"><div className="empty-orbit"><span>♪</span></div><h2>Search first. Queue second.</h2><p>Compare the title, uploader, artwork, source, and duration—then choose the exact recording you want.</p></div>}
+        {mode === 'search' && searchState === 'idle' && <div className="discovery-empty"><div className="empty-orbit"><span>♪</span></div><h2>Lossless FLAC search.</h2><p>Find songs and complete albums in FLAC quality, review metadata, and queue directly.</p></div>}
 
         {mode === 'search' && searchState === 'loading' && <section className="results-section" aria-busy="true"><div className="results-heading"><div><span className="eyebrow">Searching</span><h2>Finding matching recordings…</h2></div></div><div className="media-grid skeleton-grid">{Array.from({ length: 8 }, (_, i) => <div className="media-card skeleton" key={i} />)}</div></section>}
 
         {mode === 'search' && searchState === 'done' && <section className="results-section">
-          <div className="results-heading"><div><span className="eyebrow">Search results</span><h2>{results.length ? `${results.length} recordings for “${query.trim()}”` : 'No recordings found'}</h2></div>{!!results.length && <span className="result-note">Review before adding</span>}</div>
-          {results.length ? <div className="media-grid">{results.map((result) => <TrackCard key={resultKey(result)} result={result} queued={queued.has(resultKey(result))} disabled={!!busy} action={() => addSearchResult(result)} />)}</div>
+          <div className="results-heading"><div><span className="eyebrow">Search results</span><h2>{results.length ? `${results.length} FLAC recordings for “${query.trim()}”` : 'No recordings found'}</h2></div>{!!results.length && <span className="result-note">Review before adding</span>}</div>
+          {results.length ? <div className="media-grid">{results.map((result) => <TrackCard key={resultKey(result)} result={result} queued={queued.has(resultKey(result))} disabled={!!busy} onOpen={() => openSet(result)} action={() => addSearchResult(result)} />)}</div>
             : <div className="inline-empty"><strong>No matches yet</strong><span>Try fewer words, check the spelling, or search by artist and title.</span></div>}
         </section>}
 

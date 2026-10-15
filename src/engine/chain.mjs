@@ -1,104 +1,27 @@
-// The order of attempts for one track, as data.
-//
-// The old code decided this incrementally and in several places at once:
-// handleNoStart counted attempts, tryFallbackOrAbandon picked the next store,
-// startMonochromeAttempt special-cased the site swap, and tryNextSearchVariant
-// rewound the counters. Each of them mutated the item and re-queued it, so the
-// real order of attempts existed nowhere you could read it - and nowhere you
-// could test it. Building the whole plan up front makes it inspectable, lets
-// the UI say what will be tried next, and turns a fallback into an index bump.
-//
-// DEPTH. The plan is deliberately shallower than the old behaviour, which would
-// try every search variant against every store before giving up. That was
-// expensive precisely when it was least likely to work: a track missing from
-// Qobuz is rarely found by rephrasing the query a third time, and each retry
-// costs a full page load of a heavy SPA. Now that the chain ends in a YouTube
-// fallback that reliably resolves this kind of catalogue, the right shape is a
-// quick pass over each store and then out - fewer attempts per store, more
-// stores, terminal fallback last. That makes failures both faster and more
-// likely to end in a file.
+// Download attempts use only explicitly enabled FLAC sources.
 
 export const SOURCE_LUCIDA = 'lucida';
 export const SOURCE_MONOCHROME = 'monochrome';
-export const SOURCE_JAMENDO = 'jamendo';
 export const SOURCE_SOUNDCLOUD = 'soundcloud';
 export const SOURCE_YOUTUBE = 'youtube';
-// Not a search at all: the track arrived with the URL of the exact upload it
-// came from (a pasted SoundCloud set), so the first thing worth trying is that
-// file rather than a query that can only ever be a worse guess at it.
+// Retained to identify and reject direct-upload attempts from older queues.
 export const SOURCE_DIRECT = 'direct';
 
 export const DEFAULT_MAX_VARIANTS = 2;
 
-/**
- * @param spec {
- *   variants:  string[]   search queries, best first
- *   services:  string[]   Lucida store chain, in order
- *   monochrome:boolean    include the Monochrome stage (default true)
- *   jamendo:   boolean    include the authorized free Jamendo stage
- *   soundcloud:boolean    include the SoundCloud search stage (default true)
- *   directUrl: string     an exact upload to fetch before searching anything
- *   youtube:   boolean    include the terminal yt-dlp stage (default true)
- *   maxVariantsPerSource: number
- * }
- * @returns attempt descriptors: { source, service, query, variantIndex }
- */
+export const DOWNLOAD_SERVICES = ['qobuz', 'tidal', 'deezer', 'amazon', 'yandex', 'monochrome'];
+
 export function buildPlan(spec = {}) {
-  const variants = (spec.variants || []).filter(Boolean);
-  if (!variants.length) return [];
-  const cap = Math.max(1, spec.maxVariantsPerSource ?? DEFAULT_MAX_VARIANTS);
-  const used = variants.slice(0, cap);
+  const used = (spec.variants || []).filter(Boolean)
+    .slice(0, Math.max(1, spec.maxVariantsPerSource ?? DEFAULT_MAX_VARIANTS));
+  if (!used.length) return [];
   const plan = [];
-
-  if (spec.directUrl) {
-    plan.push({
-      source: SOURCE_DIRECT, service: spec.directService || SOURCE_SOUNDCLOUD,
-      query: used[0], variantIndex: 0, url: spec.directUrl,
-    });
-  }
-
-  // Jamendo is an artist-authorized, Creative Commons catalogue. It gets one
-  // strict search before the broker-backed stores: more wording variants would
-  // consume the user's API allowance while making a false match more likely.
-  // It is opt-in because every application must use its own Jamendo client ID.
-  if (spec.jamendo === true) {
-    plan.push({ source: SOURCE_JAMENDO, service: SOURCE_JAMENDO, query: used[0], variantIndex: 0 });
-  }
-
-  // Lucida's own SoundCloud store is dropped when the native stage is present:
-  // both would carry the service id 'soundcloud', and advanceAfter() skips
-  // BY SERVICE - so a dead Lucida store would take the working native source
-  // down with it. The native one is the better of the two anyway; it reads the
-  // upload directly rather than through a broker that rarely answers for it.
-  const nativeSoundcloud = spec.soundcloud !== false;
-  for (const service of spec.services || []) {
-    if (nativeSoundcloud && service === SOURCE_SOUNDCLOUD) continue;
-    used.forEach((query, variantIndex) => {
-      plan.push({ source: SOURCE_LUCIDA, service, query, variantIndex });
-    });
-  }
-
-  if (spec.monochrome !== false) {
-    // Monochrome gets the same variant budget as a store. Its cascade already
-    // walks several cards per search, but that only helps once the search has
-    // found the track at all, and the wording genuinely decides that here: the
-    // KAN run's "Dark Essence" is listed as "Dark Essence (feat. Tsunca)", which
-    // the full-credits query misses and the lead-artist query finds.
-    used.forEach((query, variantIndex) => {
-      plan.push({ source: SOURCE_MONOCHROME, service: SOURCE_MONOCHROME, query, variantIndex });
-    });
-  }
-
-  // SoundCloud before YouTube: for the electronic catalogue this app is mostly
-  // pointed at, the original upload is far more often on SoundCloud, and it is
-  // an audio host rather than a video one - so its results need less rescuing
-  // from mixes, live sets and "slowed + reverb" re-uploads.
-  if (nativeSoundcloud) {
-    plan.push({ source: SOURCE_SOUNDCLOUD, service: SOURCE_SOUNDCLOUD, query: used[0], variantIndex: 0 });
-  }
-
-  if (spec.youtube !== false) {
-    plan.push({ source: SOURCE_YOUTUBE, service: SOURCE_YOUTUBE, query: used[0], variantIndex: 0 });
+  for (const service of new Set(spec.services || [])) {
+    if (!DOWNLOAD_SERVICES.includes(service)) continue;
+    used.forEach((query, variantIndex) => plan.push({
+      source: service === SOURCE_MONOCHROME ? SOURCE_MONOCHROME : SOURCE_LUCIDA,
+      service, query, variantIndex,
+    }));
   }
   return plan;
 }
@@ -130,7 +53,15 @@ export function advanceAfter(plan, index, outcome) {
     case 'no-results':
     case 'no-match':
       return index + 1; // try the next variant, then the next store
+    // 'service-unavailable' is the name this was written against; nothing ever
+    // emitted it. The worker says 'search-unavailable' when the search never
+    // happened, and 'navigation-timeout' when the store's page never arrived -
+    // both mean the same thing here, and while they were missing from this list
+    // every one of them fell through to `default` and re-asked a dead store
+    // under a differently worded query.
     case 'service-unavailable':
+    case 'search-unavailable':
+    case 'navigation-timeout':
     case 'provider-failed':
       // Skip this source's remaining variants: a store that cannot serve the
       // track will not serve it under a differently worded query either.

@@ -31,17 +31,13 @@ test('stops at the first source that delivers', async () => {
   assert.deepEqual(seen, ['a:qobuz:0']);
 });
 
-test('walks stores, then Monochrome, SoundCloud, then YouTube', async () => {
+test('exhausts selected stores without unselected fallbacks', async () => {
   const { c, seen } = makeController({ youtube: { outcome: 'completed' } });
   c.add(track('a'));
   await c.pool.onIdle();
-  assert.equal(c.getItem('a').status, COMPLETED);
-  assert.deepEqual(seen, [
-    'a:qobuz:0', 'a:qobuz:1', 'a:amazon:0', 'a:amazon:1',
-    'a:monochrome:0', 'a:monochrome:1', 'a:soundcloud:0', 'a:youtube:0',
-  ]);
+  assert.equal(c.getItem('a').status, SKIPPED);
+  assert.deepEqual(seen, ['a:qobuz:0', 'a:qobuz:1', 'a:amazon:0', 'a:amazon:1']);
 });
-
 test('a store that cannot supply the audio loses its remaining wordings', async () => {
   const { c, seen } = makeController((item, step) =>
     step.service === 'qobuz' ? { outcome: 'provider-failed' } : { outcome: 'no-results' });
@@ -64,12 +60,12 @@ test('explains a skip in terms of what was tried', async () => {
 
 test('distinguishes "nobody has it" from "found it but could not serve it"', async () => {
   const { c } = makeController((item, step) =>
-    step.service === 'monochrome' ? { outcome: 'provider-failed', message: 'no audio stream' } : { outcome: 'no-results' });
+    step.service === 'amazon' ? { outcome: 'provider-failed', message: 'no audio stream' } : { outcome: 'no-results' });
   c.add(track('a'));
   await c.pool.onIdle();
   // The final reason must name the source that HAD the track, so the user can
   // tell "nobody stocks this" from "it exists but the backend was broken".
-  assert.match(c.getItem('a').statusText, /Found on Monochrome but no source could supply the audio/);
+  assert.match(c.getItem('a').statusText, /Found on Amazon Music but no source could supply the audio/);
 });
 
 test('reports which source is being asked, not just "fetching"', async () => {
@@ -135,16 +131,28 @@ test('tracks with no key are never collapsed into each other', async () => {
   assert.equal(c.add([track('a'), track('b')]), 2);
 });
 
-test('asks the original store first, then the fallback chain', async () => {
-  // `services` holds only the FALLBACKS - qobuz is kept out of it because it is
-  // normally the originating store. Planning from that list alone would never
-  // ask the one source most likely to have the track.
+test('does not add the original store unless enabled', async () => {
   const { c, seen } = makeController({ tidal: { outcome: 'completed' } });
   c.add(track('a', { originalService: 'tidal' }));
   await c.pool.onIdle();
-  assert.equal(seen[0], 'a:tidal:0');
+  assert.ok(seen.every(s => !s.includes(':tidal:')));
+  assert.equal(c.getItem('a').status, SKIPPED);
 });
 
+test('settings changes exclude a disabled source from an existing plan', async () => {
+  const { c, seen } = makeController(() => { c.services = ['qobuz']; return { outcome: 'no-results' }; });
+  c.add(track('a'));
+  await c.pool.onIdle();
+  assert.ok(seen.every(s => s.includes(':qobuz:')));
+});
+
+test('an empty selection never runs a worker even with an original or media source', async () => {
+  const { c, seen } = makeController({});
+  c.services = [];
+  c.add(track('a', { originalService: 'tidal', mediaUrl: 'https://soundcloud.com/a/b' }));
+  await c.pool.onIdle();
+  assert.deepEqual(seen, []);
+});
 test('does not ask the same store twice when it is also in the chain', async () => {
   const { c, seen } = makeController({});
   c.add(track('a', { originalService: 'qobuz' }));
@@ -302,6 +310,32 @@ function pipelined(answers, opts = {}) {
 }
 
 const settle = () => new Promise((r) => setTimeout(r, 25));
+
+test('any finished detached transfer frees a search slot without waiting for slower files', async () => {
+  const { c, transfers, seen } = pipelined({ qobuz: { outcome: 'transferring' } }, { concurrency: 2, maxTransfers: 1 });
+  c.add(['a', 'b', 'c', 'd'].map(id => track(id, { key: id })));
+  await settle();
+  assert.equal(seen.length, 3, 'one detached file and two occupied workers');
+  transfers.get('a')({ status: 'completed', file: 'a.flac', bytes: 1 });
+  await settle();
+  assert.equal(seen.length, 4, 'search resumes while b and c are still downloading');
+  assert.equal(c.transfers.size, 1, 'the configured detached-transfer cap is respected');
+  for (const id of ['b', 'c', 'd']) transfers.get(id)({ status: 'completed', file: `${id}.flac`, bytes: 1 });
+  await settle(); await c.pool.onIdle();
+  assert.equal(c.stats.completed, 4); assert.equal(c._listeners.size, 0, 'capacity subscriptions are removed');
+  c.dispose();
+});
+
+test('cancelling workers waiting for transfer capacity releases their listeners and slots', async () => {
+  const { c } = pipelined({ qobuz: { outcome: 'transferring' } }, { concurrency: 2, maxTransfers: 1 });
+  c.add(['a', 'b', 'c'].map(id => track(id, { key: id })));
+  await settle();
+  assert.ok(c._listeners.size > 0);
+  c.cancelAll(); await c.pool.onIdle(); await settle();
+  assert.equal(c.transfers.size, 0); assert.equal(c._listeners.size, 0);
+  assert.ok(c.getItems().every(rec => rec.status === 'cancelled'));
+  c.dispose();
+});
 
 test('a started transfer frees the slot for the next track', async () => {
   const { c, transfers, seen } = pipelined({ qobuz: { outcome: 'transferring' } }, { concurrency: 1 });
@@ -464,4 +498,25 @@ test('an adopted track is still deduplicated against the queue', async () => {
   c.adoptTransfer(track('a', { key: 'same' }), { received: 1, total: 2 });
   assert.equal(c.add(track('b', { key: 'same' })), 0);
   assert.equal(c.stats.total, 1);
+});
+
+test('cancelling an inline transfer always notifies cancelTransfer', async () => {
+  const cancelledTransfers = [];
+  const worker = {
+    async run() {
+      return { outcome: 'transferring' };
+    },
+  };
+  const c = new Controller({
+    getWorker: () => worker,
+    services: ['qobuz'],
+    concurrency: 1,
+    maxTransfers: 0, // forces inline transfer
+    awaitTransfer: () => new Promise(() => {}),
+    cancelTransfer: (id) => cancelledTransfers.push(id),
+  });
+  c.add(track('t1'));
+  await settle();
+  c.cancel('t1');
+  assert.deepEqual(cancelledTransfers, ['t1']);
 });

@@ -3,6 +3,34 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      This window runs with nodeIntegration on and contextIsolation off, so the
+      thing actually worth preventing is a script loaded from somewhere that is
+      not this app. script-src carries no remote origin, which is what does that.
+
+      'unsafe-eval' is deliberately ABSENT: the built bundle was checked without
+      it and runs clean, and leaving it in is what Electron's own "Insecure
+      Content-Security-Policy" warning fires on. 'unsafe-inline' stays for the
+      style attributes React writes and for the dev server's injected scripts.
+      If `LF_DEV=1` ever starts failing with a CSP error in the console, that is
+      this line - relax it for dev only, not for the built app.
+
+      frame-src and child-src are deliberately open: the scraper and worker
+      <webview>s load lucida.to, monochrome.st and friends, and that IS the app.
+      img-src allows https: because artwork comes from a rotating set of CDNs.
+    -->
+    <meta http-equiv="Content-Security-Policy" content="
+      default-src 'self';
+      script-src 'self' 'unsafe-inline';
+      style-src 'self' 'unsafe-inline';
+      img-src 'self' data: blob: https:;
+      media-src 'self' data: blob:;
+      font-src 'self' data:;
+      connect-src 'self' https: ws://localhost:5173;
+      frame-src *;
+      child-src *;
+      object-src 'none';
+    " />
     <title>Lucida Fetcher</title>
   </head>
   <body>

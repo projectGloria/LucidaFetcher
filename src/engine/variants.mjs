@@ -15,9 +15,10 @@ const CREDIT_PAREN = /\s*[([]\s*(?:feat\.?|featuring|with)\b[^)\]]*[)\]]/gi;
 const TRAILING_MARKER = /\s*[([][^)\]]*[)\]]\s*$|\s+-\s+[^-]+$/;
 
 const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+const broadQueryTitle = (s) => clean(String(s || '').replace(/['‘’]/g, '').replace(/[()[\],.!?"“”]+/g, ' '));
 
 export function primaryArtist(artist) {
-  return clean(String(artist || '').split(/\s*[,&]\s*/)[0]);
+  return clean(String(artist || '').split(/(?:[,&;]|\s+[/x]\s+|\s+(?:feat\.?|ft\.?|featuring|with|vs\.?)\s+)/i)[0]);
 }
 
 // The single best-guess query, used for display and as the report's searchQuery.
@@ -30,16 +31,16 @@ export function buildSearchVariants(title, artist, album) {
   const exact = clean(String(title || '').replace(CREDIT_PAREN, ''));
   const all = clean(artist);
   const primary = primaryArtist(artist);
-  const flattened = clean(exact.replace(/[()[\],.!?]+/g, ' '));
-  const stripped = clean(exact.replace(TRAILING_MARKER, ''));
+  const flattened = broadQueryTitle(exact);
+  const stripped = broadQueryTitle(exact.replace(TRAILING_MARKER, ''));
 
   const out = [
     [exact, all].filter(Boolean).join(' '),           // full credits
     [exact, primary].filter(Boolean).join(' '),       // lead artist only
+    [stripped, primary].filter(Boolean).join(' '),    // broaden before the cap cuts off fallbacks
     [flattened, primary].filter(Boolean).join(' '),   // punctuation flattened
     [exact, primary, album || ''].filter(Boolean).join(' '), // disambiguate by album
-    // Structurally different fallbacks - these are what the old list lacked.
-    [stripped, primary].filter(Boolean).join(' '),    // without a trailing edit marker
+    // Title alone still retains the original recording metadata for scoring.
     exact,                                            // title alone; the scorer still
                                                       // enforces the artist match, so a
                                                       // wrong-artist hit is rejected, but

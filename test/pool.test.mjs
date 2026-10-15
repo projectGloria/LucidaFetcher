@@ -132,3 +132,54 @@ test('onIdle resolves immediately when there is nothing to do', async () => {
   const pool = new Pool({ concurrency: 2, run: async () => {} });
   await pool.onIdle();
 });
+
+test('lowering and raising concurrency never hands a busy slot to a second task', async () => {
+  // A range input fires onChange for every step of a drag, so 3 -> 1 -> 3 is one
+  // gesture. setConcurrency used to grow by pushing every index in [old, new)
+  // back unconditionally - but a BUSY slot is not in _freeSlots to begin with,
+  // so those indices were already in use. Two tasks on one slot means two
+  // chains driving the same webview and registering the same webContentsId
+  // download context, which files a finished track under the wrong one.
+  //
+  // Sequential REUSE of a slot is correct and expected; what must never happen
+  // is two tasks holding the same slot at the same time.
+  const live = new Set();
+  let collided = null;
+  let release;
+  const held = new Promise((r) => { release = r; });
+
+  const pool = new Pool({
+    concurrency: 3,
+    run: async (item, slot) => {
+      if (live.has(slot)) collided = slot;
+      live.add(slot);
+      await held;
+      live.delete(slot);
+    },
+  });
+
+  pool.submit(items(3));
+  await tick(1);
+  assert.deepEqual([...live].sort(), [0, 1, 2]);
+
+  pool.setConcurrency(1);
+  pool.setConcurrency(3);
+  pool.submit([{ id: 'late-a' }, { id: 'late-b' }]);
+  await tick(1);
+
+  assert.equal(collided, null, `slot ${collided} was handed to two tasks at once`);
+  assert.equal(live.size, 3, 'nothing may start while every slot is held');
+
+  release();
+  await pool.onIdle();
+  assert.equal(collided, null, 'still no double-booked slot once the queue drains');
+});
+
+test('a slot retired by shrinking is not reused until it is back under the ceiling', async () => {
+  const slots = [];
+  const pool = new Pool({ concurrency: 3, run: async (item, slot) => { slots.push(slot); await tick(1); } });
+  pool.setConcurrency(2);
+  pool.submit(items(4));
+  await pool.onIdle();
+  assert.ok(slots.every((s) => s < 2), `slot above the ceiling was used: ${slots}`);
+});

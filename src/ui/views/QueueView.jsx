@@ -44,6 +44,7 @@ export default function QueueView({ onToast }) {
 
   // Remove the whole playlist even when a status filter hides some tracks.
   const removeGroup = (group) => {
+    if (!controller) return;
     const n = controller.removeGroup(group.id);
     onToast(n ? `Removed ${n} track${n === 1 ? '' : 's'} from the list. Files already downloaded are untouched.` : 'Nothing to remove.');
   };
@@ -51,6 +52,7 @@ export default function QueueView({ onToast }) {
   // A profile is a queue of forty playlists; removing it one playlist at a time
   // is not a thing anyone would sit through.
   const removeProfile = (node) => {
+    if (!controller) return;
     const n = node.groups.reduce((sum, g) => sum + controller.removeGroup(g.id), 0);
     onToast(n
       ? `Removed ${n} track${n === 1 ? '' : 's'} from ${node.name}. Files already downloaded are untouched.`
@@ -58,7 +60,8 @@ export default function QueueView({ onToast }) {
   };
 
   const retry = () => {
-    const n = controller.retrySkipped();
+    if (!controller) return;
+    const n = controller.retrySkipped({ force: true });
     onToast(n ? `Requeued ${n} missing track${n === 1 ? '' : 's'}.` : 'Nothing left to retry.');
   };
 
@@ -83,18 +86,34 @@ export default function QueueView({ onToast }) {
               Retry missing ({stats.skipped})
             </button>
           )}
-          {visibleGroups.length > 1 && (
-            <button
-              className="btn btn-sm btn-ghost"
-              onClick={() => setCollapsed(visibleGroups.every(g => collapsed.has(g.id)) ? new Set() : new Set(visibleGroups.map(g => g.id)))}
-            >
-              {visibleGroups.every(g => collapsed.has(g.id)) ? 'Expand all' : 'Collapse all'}
-            </button>
-          )}
+          {(() => {
+            const allCollapsibleIds = [
+              ...visible.filter((n) => n.kind === 'profile').map((n) => n.id),
+              ...visibleGroups.map((g) => g.id),
+            ];
+            if (allCollapsibleIds.length <= 1) return null;
+            const allCollapsed = allCollapsibleIds.every((id) => collapsed.has(id));
+            return (
+              <button
+                className="btn btn-sm btn-ghost"
+                onClick={() => setCollapsed(allCollapsed ? new Set() : new Set(allCollapsibleIds))}
+              >
+                {allCollapsed ? 'Expand all' : 'Collapse all'}
+              </button>
+            );
+          })()}
         </div>
       </header>
 
       <div className="pane">
+        {controller?.keepTrying && (
+          <p className="hint" role="status">
+            {controller.paused ? 'Keep trying is paused.'
+              : controller.retryStopped ? 'Keep trying is stopped. Add music or retry missing tracks to start it again.'
+              : controller.retryAt ? `Keep trying: missing tracks will retry at ${new Date(controller.retryAt).toLocaleTimeString()}.`
+              : 'Keep trying is on. Missing tracks will retry after this queue finishes.'}
+          </p>
+        )}
         {!visible.length ? (
           <EmptyState filter={filter} total={stats.total} />
         ) : (
@@ -228,7 +247,7 @@ function Group({ group, collapsed, onToggle, onRemove }) {
       >
         <span className={`chevron${collapsed ? ' collapsed' : ''}`} aria-hidden="true">▾</span>
         {group.artwork
-          ? <img className="group-art" src={group.artwork} alt="" />
+          ? <img className="group-art" src={group.artwork} alt="" referrerPolicy="no-referrer" />
           : <div className="group-art" aria-hidden="true" />}
         <div className="group-meta">
           <div className="name">{group.name}</div>
@@ -276,7 +295,7 @@ function Group({ group, collapsed, onToggle, onRemove }) {
       </div>
       {!collapsed && (
         <div className="rows" id={bodyId}>
-          {group.records.map((rec) => <TrackRow key={rec.item.id} rec={rec} />)}
+          {group.records.map((rec) => <TrackRow key={rec.id || rec.item.id} rec={rec} />)}
         </div>
       )}
     </section>
@@ -289,7 +308,7 @@ function EmptyState({ filter, total }) {
       <div className="empty">
         <div className="big">♪</div>
         <h3>Nothing queued yet</h3>
-        <p>Paste a SoundCloud, YouTube, Spotify, Deezer or Lucida link under <strong>Add music</strong>, or search for a single track.</p>
+        <p>Paste a Spotify, Deezer or Lucida link under <strong>Add music</strong>, or search for a track or album.</p>
       </div>
     );
   }

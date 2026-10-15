@@ -14,7 +14,8 @@ export { buildLucidaScript } from './cascade-lucida.mjs';
 export { buildMonochromeScript } from './cascade-monochrome.mjs';
 export { rankYouTube, pickYouTube, cleanYouTubeTitle } from './yt-fallback.mjs';
 export {
-  Controller, QUEUED, SEARCHING, DOWNLOADING, COMPLETED, SKIPPED, CANCELLED,
+  Controller, identityKey,
+  QUEUED, SEARCHING, READY, DOWNLOADING, COMPLETED, SKIPPED, CANCELLED,
 } from './controller.mjs';
 export {
   viewAdapter, ipcAdapter, DownloadTracker, ensureWorkerViews,

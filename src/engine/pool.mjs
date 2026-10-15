@@ -35,14 +35,25 @@ export class Pool {
   setConcurrency(n) {
     const next = Math.max(1, n | 0);
     if (next === this._concurrency) return;
-    if (next > this._concurrency) {
-      for (let i = this._concurrency; i < next; i++) this._freeSlots.push(i);
-    } else {
-      // Slots above the new ceiling are retired as they come back; anything
-      // running in one is left alone to finish rather than killed mid-download.
-      this._freeSlots = this._freeSlots.filter((s) => s < next);
-    }
     this._concurrency = next;
+
+    // Rebuilt from what is ACTUALLY running, never by arithmetic on the old
+    // ceiling. Growing used to push every index in [old, new) back
+    // unconditionally - but a busy slot is not in _freeSlots to begin with, it
+    // is held by its task - so lowering the concurrency slider and raising it
+    // again (a range input fires on every step of one drag) handed a live slot
+    // to a second chain. Two chains on one slot means two tracks driving the
+    // same webview AND registering the same webContentsId download context,
+    // which files the finished file under the wrong track: silent corruption,
+    // not a visible failure.
+    //
+    // Slots at or above the new ceiling keep running; _start's finally checks
+    // the ceiling before returning one, so they retire as they come back.
+    const busy = new Set();
+    for (const run of this.active.values()) busy.add(run.slot);
+    this._freeSlots = [];
+    for (let i = 0; i < next; i++) if (!busy.has(i)) this._freeSlots.push(i);
+
     this._pump();
   }
 
@@ -73,6 +84,7 @@ export class Pool {
     this.queue = this.queue.filter((it) => it.id !== id);
     const running = this.active.get(id);
     if (running) { try { running.controller.abort(); } catch (e) { /* already settled */ } }
+    this._pump();
     return this.queue.length < before || !!running;
   }
 
@@ -81,6 +93,7 @@ export class Pool {
     for (const { controller } of this.active.values()) {
       try { controller.abort(); } catch (e) { /* already settled */ }
     }
+    this._pump();
   }
 
   /** Resolves when nothing is queued and nothing is running. */
@@ -90,15 +103,20 @@ export class Pool {
   }
 
   _pump() {
-    while (!this.paused && this.queue.length && this._freeSlots.length) {
+    while (!this.paused && this.queue.length && this._freeSlots.length && this.active.size < this._concurrency) {
+      // A detached transfer can fail before its original task returns its slot.
+      // Starting that id twice overwrites active and gives away a busy webview.
+      const index = this.queue.findIndex((item) => !this.active.has(item.id));
+      if (index < 0) break;
       const slot = this._freeSlots.shift();
-      const item = this.queue.shift();
+      const [item] = this.queue.splice(index, 1);
       this._start(item, slot);
     }
     if (!this.queue.length && !this.active.size) {
       const waiting = this._idleResolvers;
       this._idleResolvers = [];
       waiting.forEach((r) => r());
+      this.onEvent('idle', {});
     }
   }
 

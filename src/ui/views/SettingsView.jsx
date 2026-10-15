@@ -5,13 +5,23 @@ import { configureSounds, play } from '../sounds.js';
 import SourceIcon from '../components/SourceIcon.jsx';
 import { SERVICE_LABELS } from '../../engine/status.mjs';
 
-const ALL_SERVICES = ['qobuz', 'tidal', 'deezer', 'amazon', 'yandex'];
+const ALL_SERVICES = ['qobuz', 'tidal', 'deezer', 'amazon', 'yandex', 'monochrome'];
 
-export default function SettingsView({ config, setConfig, onToast }) {
+export default function SettingsView({ config, setConfig, onToast, throttleOff = false }) {
   const [local, setLocal] = useState(config);
+  const [draftSpeed, setDraftSpeed] = useState(() => (config.speedLimitKBps != null ? String(config.speedLimitKBps) : '0'));
   const [notes, setNotes] = useState('');
   const [withPrevious, setWithPrevious] = useState(false);
   const [exporting, setExporting] = useState(false);
+
+  const commitSpeed = () => {
+    const trimmed = draftSpeed.trim();
+    const val = trimmed === '' ? 0 : Math.max(0, parseInt(trimmed, 10) || 0);
+    setDraftSpeed(String(val));
+    if (val !== (local.speedLimitKBps || 0)) {
+      patch({ speedLimitKBps: val });
+    }
+  };
 
   const saveReport = async () => {
     if (!isElectron || exporting) return;
@@ -30,13 +40,38 @@ export default function SettingsView({ config, setConfig, onToast }) {
     } finally { setExporting(false); }
   };
 
+  // A range input fires onChange for EVERY step of a drag, and committing there
+  // meant a config write, a log line and a pool rebuild at each intermediate
+  // value - and dragging the concurrency slider down and back up handed a live
+  // slot to a second chain. The label follows the drag; the commit waits for
+  // the release.
+  const [dragging, setDragging] = useState({});
+  const rangeValue = (key, fallback) => (
+    dragging[key] != null ? dragging[key] : (local[key] == null ? fallback : local[key])
+  );
+  const onRangeDrag = (key) => (e) => {
+    const n = Number(e.target.value);
+    setDragging((d) => ({ ...d, [key]: n }));
+  };
+  const onRangeCommit = (key, apply) => () => {
+    const n = dragging[key];
+    setDragging((d) => { const rest = { ...d }; delete rest[key]; return rest; });
+    if (n == null || n === local[key]) return;
+    patch({ [key]: n });
+    if (apply) apply(n);
+  };
+
   const patch = (next) => {
     const merged = { ...local, ...next };
     setLocal(merged);
     setConfig(merged);
     if (isElectron) ipc.send('set-config', next);
     const controller = getController();
-    if (controller && next.fallbackServices) controller.services = next.fallbackServices;
+    if (controller && next.fallbackServices) {
+      if (controller.setServices) controller.setServices(next.fallbackServices);
+      else controller.services = next.fallbackServices;
+    }
+    if (controller && 'keepTrying' in next) controller.setKeepTrying?.(next.keepTrying);
     return merged;
   };
 
@@ -52,71 +87,43 @@ export default function SettingsView({ config, setConfig, onToast }) {
     patch({ fallbackServices: next });
   };
 
-  const toggleFreeService = (sv) => {
-    const cur = local.freeSources || ['jamendo'];
-    const next = cur.includes(sv) ? cur.filter((s) => s !== sv) : [...cur, sv];
-    const merged = patch({ freeSources: next });
-    const controller = getController();
-    if (controller) controller.planOptions.jamendo =
-      next.includes('jamendo') && !!String(merged.jamendoClientId || '').trim();
-  };
-
   return (
     <>
-      <header className="topbar"><h1>Settings</h1></header>
-      <div className="pane pane-narrow">
+      <header className="topbar">
+        <div>
+          <h1>Settings</h1>
+          <span className="topbar-subtitle">Downloads land where you point them, at the speed you allow</span>
+        </div>
+      </header>
 
+      <div className="pane settings-grid">
         <section className="card">
-          <div className="card-head"><h2>Library</h2></div>
+          <div className="card-head"><h2>Destination</h2></div>
           <div className="card-body">
             <div className="field">
-              <label htmlFor="dl-path">Download folder</label>
+              <label htmlFor="folder">Download folder</label>
               <div className="row-actions">
-                <input id="dl-path" className="input mono" readOnly value={local.downloadPath || ''} />
-                <button className="btn" onClick={pickFolder} disabled={!isElectron}>Change…</button>
+                <input
+                  id="folder"
+                  className="input"
+                  readOnly
+                  value={local.downloadPath || ''}
+                  placeholder="Select a folder…"
+                />
+                <button className="btn" disabled={!isElectron} onClick={pickFolder}>
+                  Browse…
+                </button>
+                <button
+                  className="btn"
+                  disabled={!isElectron || !local.downloadPath}
+                  onClick={() => ipc.invoke('open-path', local.downloadPath)}
+                >
+                  Open
+                </button>
               </div>
-              <span className="hint">Each playlist gets its own subfolder, alongside a report of what could not be found.</span>
-            </div>
-          </div>
-        </section>
-
-        <section className="card">
-          <div className="card-head">
-            <h2>Free sources</h2>
-            <span className="spacer" style={{ flex: 1 }} />
-            <span className="pill">artist-authorized</span>
-          </div>
-          <div className="card-body">
-            <label className="switch">
-              <input
-                type="checkbox"
-                checked={(local.freeSources || ['jamendo']).includes('jamendo')}
-                onChange={() => toggleFreeService('jamendo')}
-              />
-              <span className="track" />
-              <span>
-                <div style={{ fontWeight: 550 }}>Jamendo</div>
-                <div className="hint">Creative Commons music whose artists explicitly allow downloading.</div>
-              </span>
-            </label>
-            <div className="field">
-              <label htmlFor="jamendo-client">Jamendo client ID</label>
-              <input
-                id="jamendo-client"
-                className="input mono"
-                value={local.jamendoClientId || ''}
-                placeholder="Get a free ID from developer.jamendo.com"
-                onChange={(e) => {
-                  const jamendoClientId = e.target.value.trim();
-                  const merged = patch({ jamendoClientId });
-                  const controller = getController();
-                  if (controller) controller.planOptions.jamendo =
-                    (merged.freeSources || ['jamendo']).includes('jamendo') && !!jamendoClientId;
-                }}
-              />
               <span className="hint">
-                Create a non-commercial app at developer.jamendo.com. Jamendo is skipped until this is filled in;
-                its public testing ID is deliberately not shipped.
+                Every track lands inside this folder. A track downloaded as part of a
+                playlist or album goes into its own subfolder underneath it.
               </span>
             </div>
           </div>
@@ -126,16 +133,23 @@ export default function SettingsView({ config, setConfig, onToast }) {
           <div className="card-head"><h2>Downloading</h2></div>
           <div className="card-body">
             <div className="field">
-              <label htmlFor="conc">Simultaneous downloads — {local.concurrency || 3}</label>
+              <label htmlFor="conc">Simultaneous downloads — {rangeValue('concurrency', 3)}</label>
               <input
                 id="conc" type="range" min="1" max="6" step="1"
-                value={local.concurrency || 3}
-                onChange={(e) => {
-                  const n = Number(e.target.value);
-                  patch({ concurrency: n });
+                value={rangeValue('concurrency', 3)}
+                onChange={onRangeDrag('concurrency')}
+                onPointerUp={onRangeCommit('concurrency', (n) => {
                   const c = getController();
                   if (c && c.setConcurrency) c.setConcurrency(n);
-                }}
+                })}
+                onKeyUp={onRangeCommit('concurrency', (n) => {
+                  const c = getController();
+                  if (c && c.setConcurrency) c.setConcurrency(n);
+                })}
+                onBlur={onRangeCommit('concurrency', (n) => {
+                  const c = getController();
+                  if (c && c.setConcurrency) c.setConcurrency(n);
+                })}
               />
               <span className="hint">
                 Each one drives its own hidden browser page. Three is a good balance —
@@ -146,19 +160,38 @@ export default function SettingsView({ config, setConfig, onToast }) {
 
             <div className="divider" />
 
+            <label className="switch">
+              <input type="checkbox" checked={!!local.keepTrying}
+                onChange={(e) => patch({ keepTrying: e.target.checked })} />
+              <span className="track" />
+              <span>
+                <div style={{ fontWeight: 550 }}>Keep trying</div>
+                <div className="hint">After all searches and downloads finish, automatically retry missing tracks. Waits 30 seconds between passes, increasing to 5 minutes for repeated failures. Pause or cancel all to stop retries.</div>
+              </span>
+            </label>
+
+            <div className="divider" />
+
             <div className="field">
               <label htmlFor="transfers">
-                Transfers running ahead — {local.maxTransfers == null ? 3 : local.maxTransfers}
+                Transfers running ahead — {rangeValue('maxTransfers', 6)}
               </label>
               <input
                 id="transfers" type="range" min="0" max="8" step="1"
-                value={local.maxTransfers == null ? 3 : local.maxTransfers}
-                onChange={(e) => {
-                  const n = Number(e.target.value);
-                  patch({ maxTransfers: n });
+                value={rangeValue('maxTransfers', 6)}
+                onChange={onRangeDrag('maxTransfers')}
+                onPointerUp={onRangeCommit('maxTransfers', (n) => {
                   const c = getController();
                   if (c) c.maxTransfers = n;
-                }}
+                })}
+                onKeyUp={onRangeCommit('maxTransfers', (n) => {
+                  const c = getController();
+                  if (c) c.maxTransfers = n;
+                })}
+                onBlur={onRangeCommit('maxTransfers', (n) => {
+                  const c = getController();
+                  if (c) c.maxTransfers = n;
+                })}
               />
               <span className="hint">
                 Searching and downloading use different things — a hidden page for the
@@ -175,9 +208,21 @@ export default function SettingsView({ config, setConfig, onToast }) {
               <label htmlFor="speed">Speed limit (KB/s, 0 = unlimited)</label>
               <input
                 id="speed" className="input" type="number" min="0"
-                value={local.speedLimitKBps || 0}
-                onChange={(e) => patch({ speedLimitKBps: Number(e.target.value) || 0 })}
+                value={draftSpeed}
+                onChange={(e) => setDraftSpeed(e.target.value)}
+                onBlur={commitSpeed}
+                onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
               />
+              {throttleOff && (
+                // Saying nothing here is how the limiter used to disable itself
+                // for the rest of the session while this field went on showing a
+                // number that no longer did anything.
+                <span className="hint" style={{ color: 'var(--warn, #e0b341)' }}>
+                  Not being applied: a server in this session restarted its transfer
+                  whenever it was paused, so the limiter turned itself off to avoid a
+                  download that could never finish. Restart the app to try again.
+                </span>
+              )}
             </div>
           </div>
         </section>
@@ -190,28 +235,31 @@ export default function SettingsView({ config, setConfig, onToast }) {
           </div>
           <div className="card-body">
             <span className="hint" style={{ marginTop: -4 }}>
-              A track is first looked for on the store its own link points at. If that
-              fails, these are tried in turn, then Monochrome, SoundCloud, and finally YouTube.
-              SoundCloud search is included automatically. Changes apply to tracks that have not started.
+              Only enabled sources are checked, in the order you select them.
+              Downloads must be FLAC. YouTube and SoundCloud are never download sources.
             </span>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--s2)' }}>
               {ALL_SERVICES.map((sv) => {
-                const on = (local.fallbackServices || ['amazon']).includes(sv);
+                const list = local.fallbackServices || ['amazon'];
+                const idx = list.indexOf(sv);
+                const on = idx !== -1;
                 return (
                   <button
                     key={sv}
                     className={`btn btn-sm ${on ? 'btn-primary' : ''}`}
                     onClick={() => toggleService(sv)}
                     aria-pressed={on}
+                    title={on ? `Priority #${idx + 1} — click to disable` : 'Click to enable'}
                   >
                     <SourceIcon service={sv} size={20} title="" />{SERVICE_LABELS[sv] || sv}
+                    {on && <span style={{ marginLeft: 6, fontSize: '0.85em', opacity: 0.85, fontWeight: 700 }}>#{idx + 1}</span>}
                   </button>
                 );
               })}
             </div>
             <span className="hint">
-              Paste a SoundCloud track or playlist in Add music to download its exact uploads first.
-              If a source is unavailable, the next source is tried automatically.
+              Imported links identify tracks to search for on your enabled sources.
+              If no enabled source provides FLAC, the track is marked missing.
             </span>
           </div>
         </section>

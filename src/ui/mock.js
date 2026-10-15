@@ -51,9 +51,13 @@ export function makeMockController() {
   const ctrl = {
     subscribe(f) { listeners.add(f); return () => listeners.delete(f); },
     getSnapshot: () => version,
+    subscribeProgress(f) { listeners.add(f); return () => listeners.delete(f); },
+    getProgressSnapshot: () => version,
     getItems: () => [...items.values()],
     getItem: (id) => items.get(id),
     paused: false,
+    keepTrying: false,
+    setKeepTrying(enabled) { ctrl.keepTrying = !!enabled; emit(); },
     pool: { concurrency: 3 },
     get stats() {
       let queued = 0, active = 0, completed = 0, skipped = 0;

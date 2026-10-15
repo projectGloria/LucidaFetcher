@@ -2,6 +2,16 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { score, rankCandidates, isAcceptable, norm } from '../src/engine/matching.mjs';
 import { buildSearchVariants, buildSearchQuery } from '../src/engine/variants.mjs';
+import { buildPlan } from '../src/engine/chain.mjs';
+
+test('Rollin gets a useful broad query within the two-attempt budget', () => {
+  const variants = buildSearchVariants("Rollin' (Air Raid Vehicle)", 'Limp Bizkit');
+  assert.deepEqual(buildPlan({ variants, services: ['qobuz'] }).map(step => step.query), [
+    "Rollin' (Air Raid Vehicle) Limp Bizkit", 'Rollin Limp Bizkit',
+  ]);
+  assert.ok(isAcceptable(score({ title: "Rollin' (Air Raid Vehicle)", artist: 'Limp Bizkit' }, "Rollin' (Air Raid Vehicle)", 'Limp Bizkit')));
+  assert.equal(isAcceptable(score({ title: "Rollin' (Air Raid Vehicle)", artist: 'Limp Bizkit' }, "Rollin' (Urban Assault Vehicle)", 'Limp Bizkit')), false);
+});
 
 const S = (title, artist) => (ct, ca) => score({ title, artist }, ct, ca);
 
@@ -30,9 +40,10 @@ test('"version"/"original" describe an ordinary release, not an altered cut', ()
   assert.ok(isAcceptable(S('Propane Nightmares', 'Pendulum')('Propane Nightmares (album version)', 'Pendulum')));
 });
 
-test('folds stroked letters and strips non-latin scripts', () => {
+test('folds Latin accents and preserves non-Latin scripts and voicing', () => {
   assert.equal(norm('MATEØ Połoz'), 'mateo poloz');
-  assert.equal(norm('Dxrk ダーク'), 'dxrk');
+  assert.equal(norm('Dxrk ダーク'), 'dxrk ダーク');
+  assert.notEqual(norm('ダーク'), norm('ターク'));
 });
 
 test('matches an artist credited only inside the candidate title', () => {
@@ -78,4 +89,67 @@ test('every KAN failure yields more than one distinct query', () => {
 
 test('drops a feat. credit from the query but keeps it for scoring', () => {
   assert.equal(buildSearchQuery('Dark Essence (feat. Tsunca)', 'Dirrek'), 'Dark Essence Dirrek');
+});
+
+test('an artist whose name tokenises to nothing still gates the match', () => {
+  // toks() drops tokens under three characters and every stopword, so "MØ",
+  // "AC/DC" and "The xx" all reduce to []. That empty list used to fall through
+  // to the no-artist-credited case and set a = 1, switching the artist gate off
+  // for exactly the tracks it still had to guard - any title-matching candidate
+  // by any artist at all was then accepted.
+  for (const [artist, wrong] of [
+    ['MØ', 'Some Other Band'],
+    ['AC/DC', 'Random Coverband'],
+    ['The xx', 'Massive Attack'],
+  ]) {
+    const s = score({ title: 'Kamikaze', artist }, 'Kamikaze', wrong);
+    assert.equal(s.a, 0, `${artist} accepted a track credited to ${wrong}`);
+    assert.equal(isAcceptable(s), false);
+  }
+});
+
+test('a short artist name still matches its own tracks', () => {
+  for (const artist of ['MØ', 'AC/DC', 'The xx']) {
+    assert.equal(score({ title: 'Kamikaze', artist }, 'Kamikaze', artist).a, 1, artist);
+  }
+  // credited in the candidate's title rather than its artist field
+  assert.equal(score({ title: 'Sunset', artist: 'MØ' }, 'Sunset (MØ Edit)', 'A Label').a, 1);
+  // one credit of several is enough, as for any other artist
+  assert.equal(score({ title: 'Final Song', artist: 'MØ, Diplo' }, 'Final Song', 'Diplo').a, 1);
+});
+
+test('a genuinely uncredited track still gets the free pass', () => {
+  assert.equal(score({ title: 'Nothing', artist: '' }, 'Nothing', 'Anyone At All').a, 1);
+});
+
+test('matches track when expected title has feat. parenthetical not present on candidate', () => {
+  // Expected has "(feat. Julian Casablancas)" while candidate has plain title
+  const s = score(
+    { title: 'Instant Crush (feat. Julian Casablancas)', artist: 'Daft Punk' },
+    'Instant Crush',
+    'Daft Punk',
+  );
+  assert.equal(s.t, 1);
+  assert.equal(s.p, 1);
+  assert.equal(s.a, 1);
+  assert.ok(isAcceptable(s));
+});
+
+test('matches candidate with featured artist in candidate artist string', () => {
+  const s = score(
+    { title: 'Instant Crush (feat. Julian Casablancas)', artist: 'Daft Punk' },
+    'Instant Crush',
+    'Daft Punk feat. Julian Casablancas',
+  );
+  assert.equal(s.t, 1);
+  assert.equal(s.p, 1);
+  assert.equal(s.a, 1);
+  assert.ok(isAcceptable(s));
+});
+
+test('matches multi-artist collaborations with various delimiters', () => {
+  // "x", "feat.", "/" delimiters between artists
+  assert.equal(score({ title: 'Song', artist: 'Artist A x Artist B' }, 'Song', 'Artist A').a, 1);
+  assert.equal(score({ title: 'Song', artist: 'Artist A / Artist B' }, 'Song', 'Artist B').a, 1);
+  assert.equal(score({ title: 'Song', artist: 'Artist A vs. Artist B' }, 'Song', 'Artist A').a, 1);
 });

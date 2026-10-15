@@ -7,6 +7,10 @@ test('recognises Spotify and Deezer playlist links', () => {
     classifyInput('https://open.spotify.com/playlist/37i9dQZF1DX?si=abc'),
     { kind: 'spotify-playlist', id: '37i9dQZF1DX', url: 'https://open.spotify.com/playlist/37i9dQZF1DX', type: 'playlist' }
   );
+  assert.deepEqual(
+    classifyInput('https://open.spotify.com/intl-de/playlist/37i9dQZF1DX?si=abc'),
+    { kind: 'spotify-playlist', id: '37i9dQZF1DX', url: 'https://open.spotify.com/intl-de/playlist/37i9dQZF1DX', type: 'playlist' }
+  );
   assert.equal(classifyInput('https://www.deezer.com/en/playlist/908622995').kind, 'deezer-playlist');
   assert.equal(classifyInput('https://www.deezer.com/album/12345').type, 'album');
 });
@@ -24,6 +28,7 @@ test('an explicit service token overrides the default profile service', () => {
 
 test('reads a profile out of a full profile URL', () => {
   assert.deepEqual(parseProfileInput('https://open.spotify.com/user/abc123'), { service: 'spotify', user: 'abc123' });
+  assert.deepEqual(parseProfileInput('https://open.spotify.com/intl-fr/user/abc123'), { service: 'spotify', user: 'abc123' });
   assert.deepEqual(parseProfileInput('https://www.deezer.com/en/profile/55'), { service: 'deezer', user: '55' });
 });
 
@@ -35,6 +40,9 @@ test('an unrelated link is refused rather than guessed at', () => {
 test('strips characters a folder name cannot contain', () => {
   assert.equal(sanitizeFolder('AC/DC: Best of <2024>'), 'ACDC Best of 2024');
   assert.equal(sanitizeFolder('///'), 'Playlist', 'never returns an empty name');
+  assert.equal(sanitizeFolder('AUX.txt'), 'AUX_.txt', 'DOS device names remain reserved with extensions');
+  assert.equal(sanitizeFolder('Album... '), 'Album');
+  assert.equal(sanitizeFolder('Album\u0000'), 'Album');
 });
 
 const embed = (entity) =>
@@ -64,7 +72,54 @@ test('turns a Spotify playlist into queueable tracks', async () => {
 test('reports a Spotify link it cannot parse instead of throwing', async () => {
   const sources = createSources({ fetch: async () => ({ text: async () => '<html>nope</html>' }) });
   const out = await sources.spotifyPlaylist('https://open.spotify.com/playlist/x');
-  assert.match(out.error, /Failed to extract/);
+  assert.match(out.error, /without playlist metadata/);
+});
+
+test('Spotify profile playlists get distinct track covers with shared globally bounded requests', async () => {
+  let active = 0, peak = 0;
+  const calls = new Map();
+  const sources = createSources({ fetch: async url => {
+    if (url.includes('/embed/playlist/')) return { text: async () => embed({ name: 'Mix', coverArt: { sources: [{ url: 'playlist.jpg' }] },
+      trackList: Array.from({ length: 12 }, (_, i) => ({ uri: `spotify:track:${i}`, title: `Song ${i}`, subtitle: 'Artist' })) }) };
+    const id = url.split('/').pop();
+    calls.set(id, (calls.get(id) || 0) + 1);
+    active++; peak = Math.max(peak, active);
+    await new Promise(resolve => setTimeout(resolve, 2));
+    active--;
+    return { text: async () => embed({ coverArt: { sources: [{ url: `track-${id}.jpg`, width: 640 }] } }) };
+  } });
+  const [first, second] = await Promise.all(['a', 'b'].map(id => sources.spotifyPlaylist(`https://open.spotify.com/playlist/${id}`)));
+  assert.equal(first.group.artworkUrl, 'playlist.jpg');
+  assert.deepEqual(first.results.map(r => r.image), Array.from({ length: 12 }, (_, i) => `track-${i}.jpg`));
+  assert.deepEqual(first.results.map(r => r.image), second.results.map(r => r.image));
+  assert.equal(calls.size, 12);
+  assert.ok([...calls.values()].every(n => n === 1));
+  assert.ok(peak <= 8);
+});
+
+test('failed Spotify artwork requests can be repaired on reimport', async () => {
+  let fail = true;
+  const sources = createSources({ fetch: async () => {
+    if (fail) throw new Error('temporary failure');
+    return { text: async () => embed({ visualIdentity: { image: [{ url: 'album.jpg', maxWidth: 640 }] } }) };
+  } });
+  assert.equal(await sources.spotifyTrackArtwork('id'), '');
+  fail = false;
+  assert.equal(await sources.spotifyTrackArtwork('id'), 'album.jpg');
+});
+
+test('a Spotify playlists page without an avatar reads the main profile header', async () => {
+  const urls = [];
+  const sources = createSources({ scraper: { run: async url => {
+    urls.push(url);
+    return url.endsWith('/playlists')
+      ? { outcome: 'ok', profile: { name: 'User', image: '' }, items: [{ id: 'p', name: 'Mix', image: 'playlist.jpg' }] }
+      : { name: 'User', image: 'avatar.jpg' };
+  } } });
+  const result = await sources.spotifyProfilePlaylists('user');
+  assert.equal(result.profile.image, 'avatar.jpg');
+  assert.equal(result.playlists[0].image, 'playlist.jpg');
+  assert.deepEqual(urls, ['https://open.spotify.com/user/user/playlists', 'https://open.spotify.com/user/user']);
 });
 
 test('follows Deezer pagination rather than guessing a limit', async () => {
@@ -79,6 +134,19 @@ test('follows Deezer pagination rather than guessing a limit', async () => {
   const out = await sources.deezerPlaylist({ id: '9' });
   assert.equal(out.results.length, 2, 'both pages must be followed');
   assert.deepEqual(out.results[1].texts, ['B', 'Y']);
+});
+
+test('stops Deezer pagination when circular next links occur', async () => {
+  const pages = {
+    'https://api.deezer.com/playlist/9': { title: 'Looping', picture_xl: 'c.jpg' },
+    'https://api.deezer.com/playlist/9/tracks?limit=200': {
+      data: [{ title: 'A', artist: { name: 'X' } }], next: 'page2',
+    },
+    page2: { data: [{ title: 'B', artist: { name: 'Y' } }], next: 'page2' },
+  };
+  const sources = createSources({ httpJson: async (u) => pages[u] });
+  const out = await sources.deezerPlaylist({ id: '9' });
+  assert.equal(out.results.length, 2);
 });
 
 test('mapPool honours its concurrency cap', async () => {
@@ -155,19 +223,9 @@ test('preserves video IDs, playlist IDs and SoundCloud secret tokens', () => {
   ]) assert.deepEqual(classifyInput(url), { kind: 'media-link', url });
 });
 
-test('imports SoundCloud sets with exact upload URLs and durations', async () => {
+test('refuses SoundCloud and YouTube media links', async () => {
   const url = 'https://soundcloud.com/artist/sets/album?secret_token=s-test';
-  let resolved;
-  const source = createSources({ resolveMedia: async (input) => {
-    resolved = input;
-    return { kind: 'playlist', title: 'Album', entries: [
-      { title: 'Artist - Song', uploader: 'Label', url: 'https://soundcloud.com/artist/song', durationSec: 123 },
-    ] };
-  } });
+  const source = createSources();
   const result = await source.resolve(url);
-  assert.equal(resolved, url);
-  assert.equal(result.group.name, 'Album');
-  assert.equal(result.results[0].mediaUrl, 'https://soundcloud.com/artist/song');
-  assert.equal(result.results[0].durationSec, 123);
-  assert.deepEqual(result.results[0].texts, ['Song', 'Artist']);
+  assert.match(result.error, /disabled/i);
 });

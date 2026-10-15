@@ -166,7 +166,7 @@ export function makePage(tracks, opts = {}) {
 
 // A Lucida page: either the search view (`results` given) or a release page
 // (`downloadControl` given).
-export function makeLucidaPage({ results = null, downloadControl = null, error = null, href = 'https://lucida.to/search?query=x' } = {}) {
+export function makeLucidaPage({ results = null, downloadControl = null, error = null, href = 'https://lucida.to/search?query=x', releaseTracks = [] } = {}) {
   const children = [];
 
   if (error) {
@@ -176,16 +176,26 @@ export function makeLucidaPage({ results = null, downloadControl = null, error =
     // what makes an empty result set look like a slow one.
     children.push(new El('h2', { text: 'Tracks' }));
     for (const r of results) {
-      const link = new El('a', { attrs: { href: r.href } });
+      const link = new El('a', { attrs: { href: r.href }, text: r.title });
+      const heading = new El('h1', { children: [link, ...(r.explicit ? [new El('span', { cls: ['explicit'], text: 'E' })] : [])] });
       const meta = new El('div', {
         cls: ['metadata'],
-        children: [link, new El('h1', { text: r.title }), new El('h2', { text: r.artist })],
+        children: [heading, new El('h2', { text: r.artist })],
       });
       children.push(new El('div', { cls: ['search-result'], children: [meta] }));
     }
   }
 
   const clicked = [];
+  for (const track of releaseTracks) {
+    const button = new El('button', { cls: ['download-button'], text: 'Download' });
+    button.onclick = () => clicked.push(track.label || track.title);
+    children.push(new El('div', { cls: ['track-row'], children: [
+      new El('span', { cls: ['title'], text: track.title }),
+      new El('span', { cls: ['artist'], text: track.artist }),
+      new El('span', { cls: ['duration'], text: track.duration || '' }), button,
+    ] }));
+  }
   if (downloadControl === 'button') {
     const btn = new El('button', { cls: ['download-button'], text: 'Download' });
     btn.onclick = () => clicked.push('download-button');

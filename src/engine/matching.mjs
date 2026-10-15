@@ -19,7 +19,7 @@
 // does consistently within that function, and the generated code keeps working.
 // Nothing below may reference a module-level binding.
 
-export const MIN_TITLE_SCORE = 0.6; // share of expected title words a hit must contain
+export const MIN_TITLE_SCORE = 1; // require agreement on the recording title
 
 // Words that carry no identifying weight. "version"/"original"/"mix" belong
 // here: on their own they name the ordinary release ("Original Mix", "album
@@ -50,9 +50,9 @@ export const FOLD = {
 // ---------------------------------------------------------------------------
 
 export function normWith(s, FOLD_) {
-  return (s || '')
-    .normalize('NFD').replace(/[̀-ͯ]/g, '')
-    .toLowerCase().replace(/[^a-z0-9\s]/g, (c) => FOLD_[c] || ' ')
+  return String(s || '')
+    .normalize('NFKD').replace(/(\p{Script=Latin})\p{M}+/gu, '$1').normalize('NFC')
+    .toLowerCase().replace(/[^\p{L}\p{M}\p{N}\s]|[łøđðþæœßıħŋŧĸ]/gu, (c) => FOLD_[c] || ' ')
     .replace(/\s+/g, ' ').trim();
 }
 
@@ -65,27 +65,45 @@ export function toksWith(s, FOLD_, STOP_, norm_) {
  * @param K { FOLD, STOP, ALTERING, toks, norm }
  * @returns { t, p, a } - t is recall (share of expected title tokens present in
  *   the candidate), p is precision (share of the candidate's own tokens that
- *   were asked for, used only to break recall ties), a is 1 only when a whole
+ *   were asked for; both must agree), a is 1 only when a whole
  *   credited artist name matched.
  */
-export function scoreWith(expected, candTitle, candArtist, K) {
-  const T = (s) => K.toks(s, K.FOLD, K.STOP, K.norm);
-  const et = T(expected.title);
-  const ct = T(candTitle);
-  const ca = T(candArtist);
+export function scoreWith(expected, candTitle, candArtist, K, candDurationSec = 0) {
+  const featParen = /\s*[([]\s*(?:feat\.?|featuring|with)\b([^)[\]]*)[)\]]/i;
+  const featMatch = featParen.exec((expected && expected.title) || '');
+  const cleanTitle = ((expected && expected.title) || '').replace(featParen, '').trim();
+  const credits = String(expected?.artist || '').split(/(?:[,&;]|\s+[/x]\s+|\s+(?:feat\.?|ft\.?|featuring|with|vs\.?)\s+)/i)
+    .map(one => K.norm(one, K.FOLD)).filter(Boolean);
+  const recordingTitle = (s) => String(s || '')
+    .replace(/\s*[([]\s*(?:feat\.?|ft\.?|featuring|with)\b[^)[\]]*[)\]]/gi, '')
+    .replace(/\s*[([]([^)[\]]*)[)\]]/g, (whole, label) => {
+      const flat = K.norm(label, K.FOLD);
+      return /^(original mix|album version|original version|deluxe edition)$/.test(flat) || credits.includes(flat) ? '' : whole;
+    })
+    .replace(/\s+-\s+(?:original mix|album version|original version)\s*$/i, '');
+  const titleTokens = (s) => K.norm(recordingTitle(s), K.FOLD).split(' ').filter(Boolean);
+  const et = titleTokens(cleanTitle);
+  const ct = titleTokens(candTitle);
   if (et.length === 0) return { t: 0, p: 0, a: 0 };
 
   let hit = 0;
-  for (const tk of et) if (ct.indexOf(tk) !== -1) hit++;
+  const remaining = ct.slice();
+  for (const tk of et) {
+    const at = remaining.indexOf(tk);
+    if (at !== -1) { hit++; remaining.splice(at, 1); }
+  }
   let t = hit / et.length;
 
   // Recall alone cannot tell "Fetish" from "Money Fetish": every expected token
   // is present in both, so both score 1.0 and ties fall to whatever order the
-  // site returned. Precision separates them (1.0 vs 0.5). It is deliberately a
-  // ranking signal only, never a gate: legitimate hits carry extra tokens all
-  // the time ("Stardust (Deluxe Edition)"), so rejecting on it would trade
-  // wrong downloads for missing ones.
+  // site returned. Require precision as well as recall; known release labels
+  // and artist credits are removed above, while distinct song/edit words stay.
   let p = ct.length ? hit / ct.length : 0;
+  if (t === 1 && p === 1 && et.some((token, i) => token !== ct[i])) { t = 0; p = 0; }
+  const duration = Number(expected?.durationSec);
+  const candidateDuration = Number(candDurationSec);
+  if (duration > 0 && candidateDuration > 0 &&
+      Math.abs(duration - candidateDuration) > Math.max(3, duration * 0.02)) { t = 0; p = 0; }
 
   // A version marker on one side but not the other means a different cut.
   for (const m of K.ALTERING) {
@@ -98,16 +116,31 @@ export function scoreWith(expected, candTitle, candArtist, K) {
   // one, so any single credit matching in full is enough. An artist can also
   // appear inside the candidate's title ("Track (Someone Remix)"), so check
   // both fields before giving up.
-  const names = (expected.artist || '').split(/[,&]/).map((n) => T(n)).filter((n) => n.length);
-  let a = names.length === 0 ? 1 : 0;
-  for (const n of names) {
-    if (n.every((tk) => ca.indexOf(tk) !== -1 || ct.indexOf(tk) !== -1)) { a = 1; break; }
+  //
+  // A CREDIT WHOSE TOKENS ALL FALL BELOW THE TOKENISER'S FLOOR still has to be
+  // checked. toks() drops anything under three characters and every stopword,
+  // so "MØ", "AC/DC" and "The xx" all reduce to nothing - and an empty name
+  // list used to fall through to the no-artist-credited case below and set
+  // a = 1, switching the artist gate off for exactly the tracks it still had
+  // to guard. Any candidate whose title merely matched was then accepted, by
+  // any artist at all. Those credits are matched on the normalised string
+  // instead, with spaces around it so a short name cannot match inside a
+  // longer word.
+  const extraArtist = featMatch ? featMatch[1] : '';
+  const rawArtistStr = ((expected && expected.artist) || '') + (extraArtist ? ',' + extraArtist : '');
+  const raw = rawArtistStr.split(/(?:[,&;]|\s+[/x]\s+|\s+(?:feat\.?|ft\.?|featuring|with|vs\.?)\s+)/i);
+  // Only a genuinely uncredited track gets the free pass.
+  let a = rawArtistStr.trim() ? 0 : 1;
+  const hay = ' ' + K.norm(candArtist, K.FOLD) + ' ' + K.norm(candTitle, K.FOLD) + ' ';
+  for (const one of raw) {
+    const flat = K.norm(one, K.FOLD).replace(/^the /, '');
+    if (flat && hay.includes(' ' + flat + ' ')) { a = 1; break; }
   }
   return { t, p, a };
 }
 
 export function isAcceptableWith(s, minTitleScore) {
-  return !!s && s.a === 1 && s.t >= minTitleScore;
+  return !!s && s.a === 1 && s.t >= Math.max(1, minTitleScore) && s.p === 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -119,8 +152,8 @@ const DEPS = { FOLD, STOP, ALTERING, toks: toksWith, norm: normWith };
 
 export const norm = (s, FOLD_) => normWith(s, FOLD_ || FOLD);
 export const toks = (s, FOLD_, STOP_) => toksWith(s, FOLD_ || FOLD, STOP_ || STOP, normWith);
-export const score = (expected, candTitle, candArtist) =>
-  scoreWith(expected, candTitle, candArtist, DEPS);
+export const score = (expected, candTitle, candArtist, candDurationSec) =>
+  scoreWith(expected, candTitle, candArtist, DEPS, candDurationSec);
 export const isAcceptable = (s, minTitleScore = MIN_TITLE_SCORE) =>
   isAcceptableWith(s, minTitleScore);
 
@@ -142,7 +175,7 @@ export function alteringMismatch(expectedTitle, candidateTitle) {
 // candidate whose stream fails can be followed by the next one.
 export function rankCandidates(expected, candidates, minTitleScore = MIN_TITLE_SCORE) {
   return candidates
-    .map((c, i) => ({ ...c, index: i, s: score(expected, c.title, c.artist) }))
+    .map((c, i) => ({ ...c, index: i, s: score(expected, c.title, c.artist, c.durationSec) }))
     .sort((x, y) => (y.s.a - x.s.a) || (y.s.t - x.s.t) || (y.s.p - x.s.p))
     .map((c) => ({ ...c, acceptable: isAcceptable(c.s, minTitleScore) }));
 }
@@ -157,7 +190,7 @@ export function rankCandidates(expected, candidates, minTitleScore = MIN_TITLE_S
  */
 export function injectableScorer(expected, minTitleScore = MIN_TITLE_SCORE) {
   return `
-    const EXPECTED = ${JSON.stringify({ title: expected.title || '', artist: expected.artist || '' })};
+    const EXPECTED = ${JSON.stringify({ title: expected.title || '', artist: expected.artist || '', durationSec: expected.durationSec || null })};
     const MIN_TITLE_SCORE = ${minTitleScore};
     const FOLD = ${JSON.stringify(FOLD)};
     const STOP = ${JSON.stringify(STOP)};
@@ -167,6 +200,14 @@ export function injectableScorer(expected, minTitleScore = MIN_TITLE_SCORE) {
     const __scoreWith = ${scoreWith.toString()};
     const isAcceptable = ${isAcceptableWith.toString()};
     const __deps = { FOLD: FOLD, STOP: STOP, ALTERING: ALTERING, toks: toks, norm: norm };
-    const score = (t, a) => __scoreWith(EXPECTED, t, a, __deps);
+    const score = (t, a, duration) => __scoreWith(EXPECTED, t, a, __deps, duration);
+    const durationOf = (el) => {
+      if (!el) return 0;
+      const raw = el.getAttribute?.('data-duration') || el.innerText || el.textContent || '';
+      if (/^\\d+(?:\\.\\d+)?$/.test(String(raw).trim())) return Number(raw);
+      const match = String(raw).match(/(?:^|\\s)(\\d{1,2}):([0-5]\\d)(?::([0-5]\\d))?(?:$|\\s)/);
+      if (!match) return 0;
+      return match[3] ? Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]) : Number(match[1]) * 60 + Number(match[2]);
+    };
   `;
 }

@@ -1,0 +1,63 @@
+# Reliability audit — 2026-10-04
+
+## Keep trying
+
+Enable **Settings → Downloading → Keep trying** to automatically retry missing
+tracks after all searches and transfers finish. The preference survives restart.
+Only missing tracks are retried; downloaded and cancelled tracks are excluded.
+Retries wait 30 seconds initially, then back off to a maximum of 5 minutes.
+Successful downloads reset the delay. Each pass clears temporary source-health
+failures so recovered providers get another chance.
+
+Pause stops new passes and pauses live transfers. Turning the option off cancels
+the scheduled pass. Cancel all cancels active/queued tracks and stops retries
+for the session. An explicit retry, newly added music, or re-enabling Keep trying
+starts retries again. Removing all missing tracks clears the timer.
+
+## Fixes
+
+- Cancellation interrupts navigation, injection, and injection-retry waits;
+  webview reset destroys lingering scripts and releases remote page resources.
+- DOM listeners are released even when navigation throws synchronously.
+- Download waits remove abort listeners on every settlement, handle pre-aborted
+  signals, and release replaced promises. Engine disposal removes IPC listeners,
+  subscriptions, persistence timers, and worker views.
+- A failed adopted transfer aborts its old waiter before restarting the chain.
+- Pool slots cannot run the same item twice concurrently. Lowering concurrency
+  respects total running work, and cancelling paused queues resolves idle waits.
+- Pause/resume now reaches Chromium transfers as well as the search pool.
+- Interrupted transfers get three bounded resume attempts. Transfers with no
+  new bytes for two minutes fail over; user and speed-limit pauses are excluded.
+- Save paths avoid existing files and concurrent writers, handle more than 99
+  collisions, normalize Windows path case, and sanitize reserved DOS filenames.
+- Save-path ownership remains reserved throughout asynchronous metadata repair.
+  Setup and finalization failures settle the renderer rather than hanging tracks.
+- Queue, config, manifest, and report writes serialize per destination and freeze
+  snapshots before asynchronous work. Queue/history deletion follows earlier
+  writes; shutdown waits for writes already running and download finalization.
+- Closing without the tray uses the same flush handshake as Quit, and another
+  quit request cannot bypass a flush in progress.
+- JSON and artwork responses are bounded while streaming, including responses
+  without Content-Length. Folder scans open at most 16 files concurrently.
+- Large retries/cancellation emit one structural update per batch. Only transfer
+  rows subscribe to byte updates. Retry reports refresh and removed groups release
+  report bookkeeping; report-cache eviction waits for pending writes.
+- Spotify embed requests have a deadline instead of hanging imports indefinitely.
+
+## Verification
+
+`npm test`: **203 passing tests**, including 28 new reliability regressions.
+
+`npm run lint`: zero problems.
+
+`npm run test:electron`: builds the production UI and boots an isolated Electron
+app with a local fixture server. The check verifies the real Settings checkbox
+and saved preference, injected cascade, automatic retry after failure, two playable
+FLAC downloads with embedded art, distinct paths for identical filenames,
+unchanged downloaded bytes, live pause/resume, disposal, clean quit, and both
+manifest entries flushed to disk. It needs ffmpeg on PATH to generate fixtures.
+
+These checks cover controlled failure and success paths. They do not establish
+current availability or unchanged markup of Lucida/Monochrome, nor constitute a
+multi-hour memory profile against those external sites. No user's runtime state
+or music library is used by the integration check.

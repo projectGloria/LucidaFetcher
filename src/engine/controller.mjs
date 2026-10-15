@@ -13,9 +13,17 @@
 // far too often to route through a store subscription.
 
 import { Pool } from './pool.mjs';
-import { buildPlan, nextAttempt, advanceAfter } from './chain.mjs';
+import { buildPlan, nextAttempt, advanceAfter, DOWNLOAD_SERVICES } from './chain.mjs';
 import { buildSearchVariants } from './variants.mjs';
 import { describeStep, describeOutcome, describeAbandon, serviceLabel } from './status.mjs';
+import { assignPlaylistFiles } from './profile-paths.mjs';
+
+// Attempt outcomes that are a verdict on the SOURCE rather than on the track.
+// Kept next to the chain's own list in advanceAfter, which skips the rest of a
+// store's variants for the same reasons.
+const UNAVAILABLE_OUTCOMES = new Set([
+  'service-unavailable', 'search-unavailable', 'navigation-timeout',
+]);
 
 export const QUEUED = 'queued';
 export const SEARCHING = 'searching';
@@ -68,7 +76,18 @@ export class Controller {
     this.services = opts.services || [];
     this.log = opts.log || (() => {});
     this.planOptions = opts.planOptions || {};
+    // Stores currently known to be down, so the rest of the queue stops paying
+    // their timeouts one track at a time. Nothing used to write to this set -
+    // markServiceUnhealthy had no caller outside the tests - so the skip was
+    // dead and a dead store cost every track in a 130-track playlist a full
+    // page-load-and-poll before the chain moved on.
+    //
+    // Time-limited rather than permanent: a store that was rate-limiting for a
+    // minute must be able to come back within the same run, and a single bad
+    // attempt should not retire it for the session.
     this.unhealthy = new Set();
+    this._unhealthyAt = new Map();
+    this.unhealthyTtlMs = opts.unhealthyTtlMs == null ? 120000 : opts.unhealthyTtlMs;
 
     // The pipeline. A scraped attempt now ends when the transfer starts, which
     // leaves the webview free to search the next track while the bytes of this
@@ -85,23 +104,40 @@ export class Controller {
     // stops the queue racing ahead of the network.
     this.maxTransfers = opts.maxTransfers == null ? 3 : Math.max(0, opts.maxTransfers | 0);
     this.transfers = new Map(); // item id -> AbortController
+    this.keepTrying = !!opts.keepTrying;
+    this.retryDelayMs = opts.retryDelayMs ?? 30000;
+    this.retryMaxDelayMs = opts.retryMaxDelayMs ?? 300000;
+    this._retryTimer = null;
+    this.retryAt = null;
+    this._retryRound = 0;
+    this._retryStopped = false;
+    this._disposed = false;
 
     this.items = new Map(); // id -> record
     // identity -> id, so the same song appearing twice in a playlist is queued
     // once. Item ids are per-entry, so they cannot answer this on their own.
     this.keys = new Map();
+    this.tracks = new Map(); // trackKey -> trackRecord
+    this.playlists = new Map(); // playlistId -> { id, name, file, trackKeys: [], profileId }
+    this.profiles = new Map(); // profileId -> profileMeta
     this._listeners = new Set();
     this._version = 0;
+    // Byte counters move several times a second per transfer; statuses do not.
+    // Progress rides its own channel so a ticking bar cannot re-render the
+    // whole queue - see subscribeProgress.
+    this._progressListeners = new Set();
+    this._progressVersion = 0;
 
     this.pool = new Pool({
       concurrency: opts.concurrency || 3,
       run: (item, slot, signal) => this._runChain(item, slot, signal),
       onEvent: (name, payload) => {
+        if (name === 'idle') this._emit();
         if (name === 'error') {
           // A chain should never throw; if one does, the track must still reach
           // a terminal state or it sits at "searching" forever.
-          const rec = this.items.get(payload.item.id);
-          if (rec && !this._isTerminal(rec.status)) {
+          const rec = this._getRecord(payload.item.id);
+          if (rec && rec.item === payload.item && !this._isTerminal(rec.status)) {
             this._set(rec, SKIPPED, `Engine error: ${payload.error && payload.error.message}`);
           }
         }
@@ -113,25 +149,151 @@ export class Controller {
 
   subscribe(fn) { this._listeners.add(fn); return () => this._listeners.delete(fn); }
   getSnapshot() { return this._version; }
-  getItems() { return [...this.items.values()]; }
-  getItem(id) { return this.items.get(id); }
+
+  _getRecord(id) {
+    if (this.items.has(id)) return this.items.get(id);
+    if (this.tracks.has(id)) return this.tracks.get(id);
+    if (typeof id === 'string' && id.includes('::')) {
+      const parts = id.split('::');
+      const key = parts[parts.length - 1];
+      return this.tracks.get(key) || null;
+    }
+    return null;
+  }
+
+  getItems() {
+    const loose = [...this.items.values()];
+    if (!this.playlists.size) return loose;
+
+    const derived = [];
+    for (const pl of this.playlists.values()) {
+      const prof = this.profiles.get(pl.profileId);
+      (pl.trackKeys || []).forEach((key, index) => {
+        const track = this.tracks.get(key);
+        if (!track) return;
+        derived.push({
+          id: `${pl.id}::${index}::${key}`,
+          trackKey: key,
+          item: {
+            ...track.item,
+            groupId: pl.id,
+            groupName: pl.name,
+            groupArtwork: pl.artwork || track.item.image,
+            folderName: pl.folderName || (prof ? `${prof.folderName}/Playlists` : 'Playlists'),
+            profileId: prof?.id || pl.profileId,
+            profileName: prof?.name || prof?.user,
+            profileUser: prof?.user,
+            profileArtwork: prof?.image,
+            profileFolder: prof?.folderName,
+          },
+          status: track.status,
+          statusText: track.statusText,
+          get progress() { return track.progress; },
+          get receivedBytes() { return track.receivedBytes; },
+          get totalBytes() { return track.totalBytes; },
+          tried: track.tried,
+          attemptStartedAt: track.attemptStartedAt,
+          result: track.result,
+          step: track.step,
+          transferService: track.transferService,
+          reused: track.firstPlaylistId !== pl.id,
+          file: track.file || track.result?.file,
+          savePath: track.savePath || track.result?.savePath,
+        });
+      });
+    }
+    return [...loose, ...derived];
+  }
+
+  getPlaylistItems(playlistId) {
+    const pl = this.playlists.get(playlistId);
+    if (!pl) return [];
+    const prof = this.profiles.get(pl.profileId);
+    return (pl.trackKeys || []).map((key, index) => {
+      const track = this.tracks.get(key);
+      if (!track) return null;
+      return {
+        id: `${pl.id}::${index}::${key}`,
+        trackKey: key,
+        item: {
+          ...track.item,
+          groupId: pl.id,
+          groupName: pl.name,
+          profileId: prof?.id || pl.profileId,
+        },
+        status: track.status,
+        statusText: track.statusText,
+        get progress() { return track.progress; },
+        get receivedBytes() { return track.receivedBytes; },
+        get totalBytes() { return track.totalBytes; },
+        tried: track.tried,
+        attemptStartedAt: track.attemptStartedAt,
+        result: track.result,
+        step: track.step,
+        transferService: track.transferService,
+        reused: track.firstPlaylistId !== pl.id,
+        file: track.file || track.result?.file,
+        savePath: track.savePath || track.result?.savePath,
+      };
+    }).filter(Boolean);
+  }
+
+  getItem(id) { return this._getRecord(id); }
+
+  /**
+   * The byte-level channel: download progress, and nothing else.
+   *
+   * A transfer reports bytes far more often than any track changes status, and
+   * only the views that draw the bytes (the dock, a row's bar) care. Everyone
+   * else subscribes to the store version and sleeps through the ticks.
+   */
+  subscribeProgress(fn) { this._progressListeners.add(fn); return () => this._progressListeners.delete(fn); }
+  getProgressSnapshot() { return this._progressVersion; }
 
   get stats() {
     let queued = 0, active = 0, ready = 0, completed = 0, skipped = 0;
-    for (const r of this.items.values()) {
+    const allRecords = [...this.items.values(), ...this.tracks.values()];
+    for (const r of allRecords) {
       if (r.status === COMPLETED) completed++;
       else if (r.status === SKIPPED) skipped++;
       else if (r.status === READY) { ready++; active++; }
       else if (r.status === SEARCHING || r.status === DOWNLOADING) active++;
       else if (r.status === QUEUED) queued++;
     }
-    return { queued, active, ready, completed, skipped, total: this.items.size };
+    return { queued, active, ready, completed, skipped, total: allRecords.length };
   }
 
-  _emit() { this._version++; this._listeners.forEach((fn) => fn()); }
+  _emit() {
+    this._syncRetry();
+    this._version++;
+    this._progressVersion++;
+    this._listeners.forEach((fn) => fn());
+    this._progressListeners.forEach((fn) => fn());
+  }
+
+  _emitProgress() {
+    this._progressVersion++;
+    this._progressListeners.forEach((fn) => fn());
+  }
+
+  updateArtwork(updates = []) {
+    if (this._disposed) return 0;
+    let changed = 0;
+    for (const update of updates) {
+      const rec = this._getRecord(update.id);
+      if (!rec || (update.item && update.item !== rec.item) || !update.image) continue;
+      rec.item.image = update.image;
+      rec.item.artworkPending = false;
+      if (this.tracks.get(update.id) === rec) rec.item.groupArtwork = update.image;
+      changed++;
+    }
+    if (changed) this._emit();
+    return changed;
+  }
 
   _set(rec, status, statusText) {
     rec.status = status;
+    if (status === COMPLETED) this._retryRound = 0;
     if (statusText !== undefined) rec.statusText = statusText;
     this._emit();
   }
@@ -139,6 +301,53 @@ export class Controller {
   _isTerminal(s) { return s === COMPLETED || s === SKIPPED || s === CANCELLED; }
 
   // ---- queue ---------------------------------------------------------------
+
+  setKeepTrying(enabled) {
+    this.keepTrying = !!enabled;
+    this._retryStopped = false;
+    this._retryRound = 0;
+    this._clearRetry();
+    this._emit();
+  }
+
+  _clearRetry() {
+    clearTimeout(this._retryTimer);
+    this._retryTimer = null;
+    this.retryAt = null;
+  }
+
+  _canRetry() {
+    const idle = this.keepTrying && !this._disposed && !this._retryStopped && !this.paused
+      && this.services.some(service => DOWNLOAD_SERVICES.includes(service)) && this.pool.pending === 0 && this.pool.activeCount === 0
+      && this.transfers.size === 0;
+    if (!idle) return false;
+    const stats = this.stats;
+    return stats.active === 0 && stats.queued === 0 && stats.skipped > 0;
+  }
+
+  _syncRetry() {
+    if (!this._canRetry()) { this._clearRetry(); return; }
+    if (this._retryTimer !== null) return;
+    // A dead store must not turn a missing playlist into a tight retry loop.
+    const delay = Math.min(this.retryMaxDelayMs, this.retryDelayMs * 2 ** Math.min(10, this._retryRound));
+    this.retryAt = Date.now() + delay;
+    this._retryTimer = setTimeout(() => {
+      this._retryTimer = null;
+      this.retryAt = null;
+      if (!this._canRetry()) return;
+      this._retryRound++;
+      const count = this.retrySkipped({ force: true });
+      this.log('queue.auto-retry', { count, round: this._retryRound });
+    }, delay);
+    this._retryTimer.unref?.();
+  }
+
+  dispose() {
+    this._disposed = true;
+    this.cancelAll();
+    this._listeners.clear();
+    this._progressListeners.clear();
+  }
 
   add(items) {
     const list = Array.isArray(items) ? items : [items];
@@ -171,7 +380,109 @@ export class Controller {
       fresh.push(item);
     }
     this.lastAdd = { added: fresh.length, duplicates };
-    if (fresh.length) { this._emit(); this.pool.submit(fresh); }
+    if (fresh.length) { this._retryStopped = false; this._retryRound = 0; this._emit(); this.pool.submit(fresh); }
+    return fresh.length;
+  }
+
+  addProfile(profileMeta = {}, playlists = [], tracks = {}, { queue = true } = {}) {
+    const profId = profileMeta.id || profileMeta.user || 'profile';
+    this.profiles.set(profId, { ...profileMeta, id: profId });
+
+    const trackEntries = tracks instanceof Map ? tracks.entries() : Object.entries(tracks || {});
+    const trackMap = tracks instanceof Map ? tracks : new Map(trackEntries);
+
+    // Register playlists
+    for (const pl of assignPlaylistFiles(playlists)) {
+      this.playlists.set(pl.id, {
+        id: pl.id,
+        name: pl.name,
+        file: pl.file || `Playlists/${String(pl.name || 'Playlist').replace(/[<>:"/\\|?*\x00-\x1f]+/g, '_').trim()}.m3u8`,
+        artwork: pl.artwork || pl.image,
+        folderName: pl.folderName,
+        trackKeys: [...(pl.trackKeys || [])],
+        profileId: profId,
+      });
+    }
+
+    // Determine firstPlaylistId for each trackKey
+    const firstPlaylistForKey = new Map();
+    for (const pl of playlists) {
+      for (const key of (pl.trackKeys || [])) {
+        if (!firstPlaylistForKey.has(key)) {
+          firstPlaylistForKey.set(key, pl.id);
+        }
+      }
+    }
+
+    const fresh = [];
+    for (const [key, meta] of trackMap.entries()) {
+      if (this.tracks.has(key)) {
+        const existing = this.tracks.get(key);
+        // Reimporting repairs artwork on completed/shared tracks too.
+        if ((meta.image || meta.artwork) && !(meta.artworkPending && existing.item.artworkPending === false)) {
+          existing.item.image = meta.image || meta.artwork;
+          existing.item.groupArtwork = existing.item.image;
+          existing.item.artworkPending = meta.artworkPending;
+        }
+        if (!existing.firstPlaylistId && firstPlaylistForKey.has(key)) {
+          existing.firstPlaylistId = firstPlaylistForKey.get(key);
+        }
+        continue;
+      }
+
+      const isDownloaded = meta.status === 'downloaded' || meta.status === COMPLETED;
+      const item = {
+        id: key,
+        key,
+        title: meta.title,
+        artist: meta.artist,
+        album: meta.album,
+        isrc: meta.isrc,
+        service: meta.service,
+        trackId: meta.trackId,
+        image: meta.image || meta.artwork,
+        artworkPending: meta.artworkPending,
+        durationSec: meta.durationSec,
+        folderName: meta.folderName || (profileMeta.folderName ? `${profileMeta.folderName}/Tracks` : 'Tracks'),
+        profileId: profId,
+        profileFolder: meta.profileFolder || profileMeta.folderName,
+        groupArtwork: meta.image || meta.artwork,
+        searchVariants: meta.searchVariants && meta.searchVariants.length
+          ? meta.searchVariants
+          : buildSearchVariants(meta.title, meta.artist, meta.album),
+      };
+
+      const rec = {
+        item,
+        status: isDownloaded ? COMPLETED : [SKIPPED, CANCELLED].includes(meta.status) ? meta.status : QUEUED,
+        statusText: isDownloaded ? 'Downloaded' : meta.statusText || 'Waiting in queue',
+        tried: meta.tried || [],
+        plan: null,
+        step: null,
+        result: isDownloaded ? { outcome: 'completed', file: meta.file, savePath: meta.savePath, bytes: meta.bytes } : null,
+        file: meta.file || null,
+        savePath: meta.savePath || null,
+        bytes: meta.bytes || null,
+        receivedBytes: meta.bytes || 0,
+        totalBytes: meta.bytes || 0,
+        firstPlaylistId: firstPlaylistForKey.get(key) || null,
+      };
+
+      this.tracks.set(key, rec);
+
+      if (rec.status === QUEUED) {
+        fresh.push(item);
+      }
+    }
+
+    if (fresh.length) {
+      this._retryStopped = false;
+      this._retryRound = 0;
+      this._emit();
+      if (queue) this.pool.submit(fresh);
+    } else {
+      this._emit();
+    }
     return fresh.length;
   }
 
@@ -184,10 +495,12 @@ export class Controller {
    * chain, which is the same route a failed transfer takes.
    */
   adoptTransfer(item, info = {}) {
-    if (this.items.has(item.id)) return false;
+    const existing = this._getRecord(item.id);
+    if (existing && existing.status !== QUEUED) return false;
     const key = identityKey(item);
-    if (key && this.keys.has(key)) return false;
+    if (key && this.keys.has(key) && this.keys.get(key) !== item.id) return false;
     if (key) this.keys.set(key, item.id);
+    if (existing) this.pool.cancel(item.id);
 
     item.searchVariants = item.searchVariants && item.searchVariants.length
       ? item.searchVariants
@@ -195,14 +508,15 @@ export class Controller {
 
     const total = info.total || 0;
     const received = info.received || 0;
-    const rec = {
+    const rec = Object.assign(existing || {}, {
       item, status: received > 0 ? DOWNLOADING : READY,
       statusText: 'Resuming where it stopped',
-      tried: item.tried || [], plan: null, step: null, result: null,
+      transferService: item.transferService || existing?.transferService || item.service || null,
+      tried: item.tried || existing?.tried || [], plan: null, step: null, result: null,
       progress: total > 0 ? Math.min(1, received / total) : null,
       receivedBytes: received, totalBytes: total,
-    };
-    this.items.set(item.id, rec);
+    });
+    if (!existing) this.items.set(item.id, rec);
 
     const ctl = new AbortController();
     this.transfers.set(item.id, ctl);
@@ -214,11 +528,14 @@ export class Controller {
       // Given up on already (failTransfer), or no longer ours.
       if (rec.transferToken !== ctl) { this._emit(); return; }
       rec.transferToken = null;
-      if (this.items.get(item.id) !== rec || rec.status === CANCELLED) { this._emit(); return; }
+      if (this._getRecord(item.id) !== rec || rec.status === CANCELLED) { this._emit(); return; }
       if (ctl.signal.aborted) { this._set(rec, CANCELLED, 'Cancelled'); return; }
 
       if (done && done.status === 'completed') {
         rec.result = { outcome: 'completed', savePath: done.savePath, file: done.file, bytes: done.bytes };
+        rec.file = done.file;
+        rec.savePath = done.savePath;
+        rec.bytes = done.bytes;
         this.log('done', { id: item.id, name: item.name, via: 'resume' });
         this._set(rec, COMPLETED, 'Downloaded');
         return;
@@ -231,23 +548,32 @@ export class Controller {
   }
 
   pause() { this.pool.pause(); this._emit(); }
-  resume() { this.pool.resume(); this._emit(); }
+  resume() { this._retryStopped = false; this.pool.resume(); this._emit(); }
   get paused() { return this.pool.paused; }
+  get retryStopped() { return this._retryStopped; }
   setConcurrency(n) { this.pool.setConcurrency(n); this._emit(); }
+  setServices(services) { this.services = [...services]; this._emit(); }
 
   cancel(id) {
-    const rec = this.items.get(id);
-    this.pool.cancel(id);
-    this._abortTransfer(id);
+    const rec = this._getRecord(id);
+    const targetId = rec?.item?.id || id;
+    this.pool.cancel(targetId);
+    this._abortTransfer(targetId);
     if (rec && !this._isTerminal(rec.status)) this._set(rec, CANCELLED, 'Cancelled');
     return !!rec;
   }
 
   cancelAll() {
+    this._retryStopped = true;
+    this._clearRetry();
     this.pool.cancelAll();
-    for (const id of [...this.transfers.keys()]) this._abortTransfer(id);
-    for (const rec of this.items.values()) {
-      if (!this._isTerminal(rec.status)) this._set(rec, CANCELLED, 'Cancelled');
+    const allRecords = [...this.items.values(), ...this.tracks.values()];
+    for (const rec of allRecords) {
+      if (!this._isTerminal(rec.status)) {
+        this._abortTransfer(rec.item.id);
+        rec.status = CANCELLED;
+        rec.statusText = 'Cancelled';
+      }
     }
     this._emit();
   }
@@ -268,6 +594,49 @@ export class Controller {
     const list = Array.isArray(ids) ? ids : [ids];
     let removed = 0;
     for (const id of list) {
+      // Check if derived playlist item: plId::index::key
+      if (typeof id === 'string' && id.includes('::')) {
+        const parts = id.split('::');
+        const plId = parts[0];
+        const idx = Number(parts[1]);
+        const key = parts[parts.length - 1];
+        const pl = this.playlists.get(plId);
+        if (pl && Array.isArray(pl.trackKeys)) {
+          if (!Number.isNaN(idx) && idx >= 0 && idx < pl.trackKeys.length) {
+            pl.trackKeys.splice(idx, 1);
+          } else {
+            const kIdx = pl.trackKeys.indexOf(key);
+            if (kIdx !== -1) pl.trackKeys.splice(kIdx, 1);
+          }
+          // Check refcount across remaining playlists
+          let refcount = 0;
+          for (const otherPl of this.playlists.values()) {
+            if (otherPl.trackKeys?.includes(key)) refcount++;
+          }
+          if (refcount === 0) {
+            const trackRec = this.tracks.get(key);
+            if (trackRec && !this._isTerminal(trackRec.status)) {
+              this.pool.cancel(key);
+              this._abortTransfer(key);
+            }
+            this.tracks.delete(key);
+          }
+          removed++;
+          continue;
+        }
+      }
+
+      if (this.tracks.has(id)) {
+        const rec = this.tracks.get(id);
+        if (!this._isTerminal(rec.status)) {
+          this.pool.cancel(id);
+          this._abortTransfer(id);
+        }
+        this.tracks.delete(id);
+        removed++;
+        continue;
+      }
+
       const rec = this.items.get(id);
       if (!rec) continue;
       // Cancel first: an in-flight chain holds a pool slot and a webview, and
@@ -285,6 +654,30 @@ export class Controller {
 
   /** Every track of one playlist/album group, by the id useGroups() keys on. */
   removeGroup(groupId) {
+    if (this.playlists.has(groupId)) {
+      const removedPl = this.playlists.get(groupId);
+      this.playlists.delete(groupId);
+      const remainingKeys = new Set();
+      for (const pl of this.playlists.values()) {
+        for (const k of pl.trackKeys || []) {
+          remainingKeys.add(k);
+        }
+      }
+      for (const key of (removedPl.trackKeys || [])) {
+        if (!remainingKeys.has(key)) {
+          const trackRec = this.tracks.get(key);
+          if (trackRec) {
+            if (!this._isTerminal(trackRec.status)) {
+              this.pool.cancel(key);
+              this._abortTransfer(key);
+            }
+            this.tracks.delete(key);
+          }
+        }
+      }
+      this._emit();
+      return (removedPl.trackKeys || []).length;
+    }
     const ids = [];
     for (const rec of this.items.values()) {
       const gid = rec.item.groupId || '__loose__';
@@ -293,8 +686,28 @@ export class Controller {
     return this.remove(ids);
   }
 
-  markServiceUnhealthy(service) { this.unhealthy.add(service); }
-  markServiceHealthy(service) { this.unhealthy.delete(service); }
+  markServiceUnhealthy(service) {
+    if (!service) return;
+    this.unhealthy.add(service);
+    this._unhealthyAt.set(service, Date.now());
+  }
+
+  markServiceHealthy(service) {
+    if (!service) return;
+    this.unhealthy.delete(service);
+    this._unhealthyAt.delete(service);
+  }
+
+  /** The skip set, with anything past its TTL given another chance. */
+  _skipSet() {
+    if (this.unhealthy.size && this.unhealthyTtlMs > 0) {
+      const now = Date.now();
+      for (const [service, at] of this._unhealthyAt) {
+        if (now - at >= this.unhealthyTtlMs) this.markServiceHealthy(service);
+      }
+    }
+    return this.unhealthy;
+  }
 
   // ---- transfer state ------------------------------------------------------
   //
@@ -303,7 +716,7 @@ export class Controller {
   // the main process, so they are pushed in from the outside.
 
   noteDownloadStarted(id, service) {
-    const rec = this.items.get(id);
+    const rec = this._getRecord(id);
     if (!rec || this._isTerminal(rec.status)) return;
     rec.progress = null; // size not known until the first progress event
     this._markReady(rec, service);
@@ -326,7 +739,7 @@ export class Controller {
   }
 
   noteProgress(id, received, total) {
-    const rec = this.items.get(id);
+    const rec = this._getRecord(id);
     if (!rec || this._isTerminal(rec.status)) return;
     // A stream with no declared length gives an indeterminate bar rather than a
     // fake one that crawls to 99% and stops.
@@ -339,8 +752,11 @@ export class Controller {
     if (received > 0 && rec.status !== DOWNLOADING) {
       rec.status = DOWNLOADING;
       rec.statusText = `Downloading from ${serviceLabel(rec.transferService || (rec.step && rec.step.service))}`;
+      this._emit(); // a status change is structural; everything re-renders once for it
+      return;
     }
-    this._emit();
+    // Bytes alone: only the views that draw them are listening.
+    this._emitProgress();
   }
 
   /**
@@ -348,18 +764,39 @@ export class Controller {
    * that answered "uh-oh" all afternoon, or a stream backend that was down, may
    * well answer now - so a skip is not necessarily permanent.
    */
-  retrySkipped() {
+  retrySkipped(opts = {}) {
+    // `force` is the user asking a second time. The once-only flag exists to
+    // stop an AUTOMATIC retry loop, not to refuse a deliberate request - and a
+    // button that silently does nothing on its second press is worse than
+    // either. The unhealthy set is cleared with it: the usual reason for asking
+    // again is that whatever was down has come back.
+    const force = !!opts.force;
+    this._retryStopped = false;
+    this._clearRetry();
+    if (force) {
+      this.unhealthy.clear();
+      this._unhealthyAt.clear();
+    }
     const again = [];
-    for (const rec of this.items.values()) {
-      if (rec.status !== SKIPPED || rec.retried) continue;
+    const allRecords = [...this.items.values(), ...this.tracks.values()];
+    for (const rec of allRecords) {
+      if (rec.status !== SKIPPED || (rec.retried && !force)) continue;
       rec.retried = true;
       rec.tried = [];
       rec.plan = null;
       rec.step = null;
-      this._set(rec, QUEUED, 'Queued for one more try');
+      rec.result = null;
+      rec.resumeIndex = null;
+      rec.progress = null;
+      rec.receivedBytes = 0;
+      rec.totalBytes = 0;
+      rec.transferService = null;
+      rec.attemptStartedAt = null;
+      rec.status = QUEUED;
+      rec.statusText = 'Queued for one more try';
       again.push(rec.item);
     }
-    if (again.length) this.pool.submit(again);
+    if (again.length) { this._emit(); this.pool.submit(again); }
     return again.length;
   }
 
@@ -367,7 +804,8 @@ export class Controller {
 
   _waitForTransfer(id, signal) {
     if (!this.awaitTransfer) return Promise.resolve(null);
-    return Promise.resolve(this.awaitTransfer(id, signal)).catch(() => null);
+    try { return Promise.resolve(this.awaitTransfer(id, signal)).catch(() => null); }
+    catch { return Promise.resolve(null); }
   }
 
   /**
@@ -376,11 +814,12 @@ export class Controller {
    * ordinary chain. Distinct from cancel(), which is the user's decision.
    */
   failTransfer(id, reason) {
-    const rec = this.items.get(id);
+    const rec = this._getRecord(id);
     if (!rec || !rec.transferToken) return false;
     const ctl = rec.transferToken;
     rec.transferToken = null;
     if (this.transfers.get(id) === ctl) this.transfers.delete(id);
+    ctl.abort(); // release the old waiter's timer and abort listener before retrying
     if (this._isTerminal(rec.status)) return false;
     this.log('transfer.gave-up', { id, name: rec.item.name, reason: reason || null });
     this._set(rec, QUEUED, 'Could not pick that download up - starting it again');
@@ -389,12 +828,13 @@ export class Controller {
   }
 
   _abortTransfer(id) {
-    const rec = this.items.get(id);
+    const rec = this._getRecord(id);
     if (rec) rec.transferToken = null;
     const ctl = this.transfers.get(id);
-    if (!ctl) return;
-    this.transfers.delete(id);
-    try { ctl.abort(); } catch (e) { /* already settled */ }
+    if (ctl) {
+      this.transfers.delete(id);
+      try { ctl.abort(); } catch (e) { /* already settled */ }
+    }
     if (this.cancelTransfer) { try { this.cancelTransfer(id); } catch (e) { /* best effort */ } }
   }
 
@@ -405,18 +845,17 @@ export class Controller {
    * goes back to the FRONT of the queue with its plan and its resume point
    * intact, rather than behind two hundred tracks it was already ahead of.
    */
-  _detachTransfer(rec, item, step, index) {
-    const ctl = new AbortController();
+  _detachTransfer(rec, item, step, ctl = new AbortController(), completion = null) {
     this.transfers.set(item.id, ctl);
     rec.transferToken = ctl;
     this._emit();
 
-    Promise.resolve(this._waitForTransfer(item.id, ctl.signal)).then((done) => {
+    Promise.resolve(completion || this._waitForTransfer(item.id, ctl.signal)).then((done) => {
       if (this.transfers.get(item.id) === ctl) this.transfers.delete(item.id);
       if (rec.transferToken !== ctl) { this._emit(); return; }
       rec.transferToken = null;
       // Removed, cancelled or otherwise no longer ours while the bytes moved.
-      if (this.items.get(item.id) !== rec || rec.status === CANCELLED) { this._emit(); return; }
+      if (this._getRecord(item.id) !== rec || rec.status === CANCELLED) { this._emit(); return; }
       if (ctl.signal.aborted) { this._set(rec, CANCELLED, 'Cancelled'); return; }
 
       const res = transferResult(done);
@@ -428,6 +867,9 @@ export class Controller {
 
       if (res.outcome === 'completed') {
         rec.result = res;
+        rec.file = res.file || rec.file;
+        rec.savePath = res.savePath || rec.savePath;
+        rec.bytes = res.bytes || rec.bytes;
         this.log('done', { id: item.id, name: item.name, service: step.service, via: 'download' });
         this._set(rec, COMPLETED, 'Downloaded');
         return;
@@ -443,21 +885,57 @@ export class Controller {
     });
   }
 
+  _transferRoom(signal) {
+    let finish;
+    const promise = new Promise(resolve => {
+      let off = () => {};
+      const abort = () => finish(false);
+      finish = open => { off(); signal?.removeEventListener('abort', abort); resolve(open); };
+      const check = () => {
+        if (signal?.aborted) finish(false);
+        else if (this.transfers.size < this.maxTransfers) finish(true);
+      };
+      off = this.subscribe(check);
+      signal?.addEventListener('abort', abort, { once: true });
+      check();
+    });
+    return { promise, cancel: () => finish(false) };
+  }
+
+  async _waitOrDetach(rec, item, step, signal) {
+    const ctl = new AbortController();
+    const abort = () => ctl.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    const completion = this._waitForTransfer(item.id, ctl.signal);
+    try {
+      for (;;) {
+        const room = this._transferRoom(ctl.signal);
+        let result;
+        try {
+          result = await Promise.race([
+            completion.then(done => ({ done })),
+            room.promise.then(open => ({ open })),
+          ]);
+        } finally { room.cancel(); }
+        if ('done' in result) return result;
+        if (!result.open || ctl.signal.aborted) return { done: null };
+        // Several workers may wake for one vacancy. Claim it synchronously.
+        if (this.transfers.size < this.maxTransfers) {
+          this._detachTransfer(rec, item, step, ctl, completion);
+          return { detached: true };
+        }
+      }
+    } finally { signal?.removeEventListener('abort', abort); }
+  }
+
   // ---- the chain -----------------------------------------------------------
 
   async _runChain(item, slot, signal) {
-    const rec = this.items.get(item.id);
+    const rec = this._getRecord(item.id);
     if (!rec || rec.status === CANCELLED) return;
 
-    // The store the track's own link points at comes FIRST, then the configured
-    // fallback chain. `services` holds only the fallbacks - qobuz is deliberately
-    // kept out of it because it is normally the originating store, so building a
-    // plan from the fallback list alone would never ask the one source most
-    // likely to have the track.
-    const services = [];
-    for (const sv of [item.originalService, ...this.services]) {
-      if (sv && services.indexOf(sv) === -1) services.push(sv);
-    }
+    const services = [...new Set(this.services)];
 
     // A track that comes back after a failed transfer resumes its chain rather
     // than restarting it: the sources it already exhausted are still exhausted.
@@ -470,10 +948,6 @@ export class Controller {
     rec.plan = buildPlan({
       variants: item.searchVariants,
       services,
-      // A track imported from a SoundCloud or YouTube link knows the exact
-      // upload it came from; that is worth trying before any search.
-      directUrl: item.mediaUrl || null,
-      directService: item.mediaService || null,
       ...this.planOptions,
     });
 
@@ -490,7 +964,7 @@ export class Controller {
     for (;;) {
       if (signal && signal.aborted) { this._set(rec, CANCELLED, 'Cancelled'); return; }
 
-      const step = nextAttempt(rec.plan, { index, skip: this.unhealthy });
+      const step = nextAttempt(rec.plan, { index, skip: this._skipSet() });
       if (!step) {
         const why = describeAbandon(rec.tried);
         this.log('skip', { id: item.id, name: item.name, reason: why, tried: rec.tried });
@@ -498,7 +972,21 @@ export class Controller {
         return;
       }
 
+      // Re-check settings for existing plans, including resumed transfers.
+      const enabled = step.service === 'jamendo'
+        ? this.planOptions.jamendo === true
+        : this.services.includes(step.service);
+      if (!enabled || ['youtube', 'soundcloud', 'direct'].includes(step.source)
+          || ['youtube', 'soundcloud'].includes(step.service)) {
+        index = step.index + 1;
+        continue;
+      }
+
       rec.step = step;
+      // When THIS attempt began, not the track's - so the UI can show how long
+      // the current source has been sitting on it, which is the number that
+      // tells a stuck-looking wait apart from a merely slow one.
+      rec.attemptStartedAt = Date.now();
       this._set(rec, SEARCHING, describeStep(step, rec.plan));
 
       let res;
@@ -509,8 +997,8 @@ export class Controller {
         res = { outcome: 'error', message: err && err.message };
       }
 
-      if (signal?.aborted || this.items.get(item.id) !== rec) {
-        if (this.items.get(item.id) === rec) this._set(rec, CANCELLED, 'Cancelled');
+      if (signal?.aborted || this._getRecord(item.id) !== rec) {
+        if (this._getRecord(item.id) === rec) this._set(rec, CANCELLED, 'Cancelled');
         return;
       }
 
@@ -521,12 +1009,18 @@ export class Controller {
       if (res.outcome === 'transferring') {
         this._markReady(rec, step.service);
         if (this.awaitTransfer && this.transfers.size < this.maxTransfers) {
-          this._detachTransfer(rec, item, step, index);
+          this._detachTransfer(rec, item, step);
           return;
         }
-        const done = await this._waitForTransfer(item.id, signal);
-        if (signal?.aborted || this.items.get(item.id) !== rec) {
-          if (this.items.get(item.id) === rec) this._set(rec, CANCELLED, 'Cancelled');
+        // Any detached file completing can free this view. Waiting only for
+        // this track's file held every slot behind the slowest transfers.
+        const waiting = this.awaitTransfer && this.maxTransfers > 0
+          ? await this._waitOrDetach(rec, item, step, signal)
+          : { done: await this._waitForTransfer(item.id, signal) };
+        if (waiting.detached) return;
+        const done = waiting.done;
+        if (signal?.aborted || this._getRecord(item.id) !== rec) {
+          if (this._getRecord(item.id) === rec) this._set(rec, CANCELLED, 'Cancelled');
           return;
         }
         res = transferResult(done);
@@ -538,8 +1032,22 @@ export class Controller {
         at: new Date().toISOString(),
       });
 
+      // What this attempt says about the STORE, as opposed to the track. Only
+      // the outcomes that mean "this source could not be asked" retire it; a
+      // confident "we do not have that" is the store working correctly and
+      // must not take it out of the chain for everything behind this track.
+      if (UNAVAILABLE_OUTCOMES.has(res.outcome)) {
+        this.markServiceUnhealthy(step.service);
+        this.log('service.unhealthy', { service: step.service, outcome: res.outcome });
+      } else {
+        this.markServiceHealthy(step.service);
+      }
+
       if (res.outcome === 'completed') {
         rec.result = res;
+        rec.file = res.file || rec.file;
+        rec.savePath = res.savePath || rec.savePath;
+        rec.bytes = res.bytes || rec.bytes;
         this.log('done', { id: item.id, name: item.name, service: step.service, via: res.via || 'download' });
         this._set(rec, COMPLETED, 'Downloaded');
         return;

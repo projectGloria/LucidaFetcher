@@ -21,6 +21,7 @@ export function viewAdapter(webview) {
       if (webview.getAttribute('src') === url) webview.reload();
       else webview.setAttribute('src', url);
     },
+    reset() { webview.setAttribute('src', 'about:blank'); },
     onDomReady(cb) {
       // A worker webview has to be created with a src to attach at all, so its
       // FIRST dom-ready is for about:blank. Passing that on makes the worker
@@ -57,7 +58,8 @@ export function viewAdapter(webview) {
  * the only thing keeping two tracks' completions apart.
  */
 export class DownloadTracker {
-  constructor(ipcRenderer, { startTimeoutMs = 120000 } = {}) {
+  constructor(ipcRenderer, { startTimeoutMs = 120000, earlyCap = 200 } = {}) {
+    this.earlyCap = earlyCap;
     this.byFile = new Map();     // filename -> itemId
     this.waiters = new Map();    // itemId -> { resolve, timer, started }
     // Results that arrived before anyone asked for them. The worker only calls
@@ -73,8 +75,14 @@ export class DownloadTracker {
     this.startWaiters = new Map(); // itemId -> { resolve, timer }
     this.started = new Set();      // itemIds whose download-started has arrived
     this.startTimeoutMs = startTimeoutMs;
+    this._ipc = ipcRenderer;
+    this._handlers = new Map();
+    const on = (channel, handler) => {
+      this._handlers.set(channel, handler);
+      ipcRenderer.on(channel, handler);
+    };
 
-    ipcRenderer.on('download-started', (event, payload) => {
+    on('download-started', (event, payload) => {
       const { file, itemId } = payload || {};
       if (!itemId) return;
       if (file) this.byFile.set(file, itemId);
@@ -98,9 +106,9 @@ export class DownloadTracker {
 
     // Bytes are reported against a filename, so this needs the same stitching
     // as completion does.
-    ipcRenderer.on('download-progress', (event, payload) => {
+    on('download-progress', (event, payload) => {
       const { file, received, total } = payload || {};
-      const itemId = file ? this.byFile.get(file) : null;
+      const itemId = this._idFor(payload, file);
       if (itemId && this.onProgress) this.onProgress(itemId, received || 0, total || 0);
     });
 
@@ -111,32 +119,72 @@ export class DownloadTracker {
     // throughout, and deliberately never settles a waiter - a completion posted
     // to 'download-status' would be filed as an unclaimed result and handed to
     // whatever attempt asked next.
-    ipcRenderer.on('media-download-started', (event, payload) => {
+    on('media-download-started', (event, payload) => {
       const { itemId } = payload || {};
       if (itemId && this.onStarted) this.onStarted(itemId, payload);
     });
 
-    ipcRenderer.on('media-download-progress', (event, payload) => {
+    on('media-download-progress', (event, payload) => {
       const { itemId, received, total } = payload || {};
       if (itemId && this.onProgress) this.onProgress(itemId, received || 0, total || 0);
     });
 
-    ipcRenderer.on('download-status', (event, payload) => {
-      const { file, status, savePath } = payload || {};
-      const itemId = file ? this.byFile.get(file) : null;
+    on('download-status', (event, payload) => {
+      const { file, status, savePath, bytes } = payload || {};
+      const itemId = this._idFor(payload, file);
       if (!itemId) return;
-      this.byFile.delete(file);
-      this._settle(itemId, { status, savePath, file });
+      if (file && this.byFile.get(file) === itemId) this.byFile.delete(file);
+      this._settle(itemId, { status, savePath, file, bytes });
     });
+  }
+
+  /**
+   * Which track an event belongs to.
+   *
+   * The itemId the main process carries is authoritative; the filename index is
+   * only a fallback for an older main process that does not send one. A
+   * filename is NOT unique - two tracks downloading files of the same name in
+   * different folders overwrite each other's entry - and the loser of that race
+   * used to be handed the winner's completion while its own attempt waited out
+   * the full start timeout and then reported a download that had in fact
+   * succeeded.
+   */
+  _idFor(payload, file) {
+    if (payload && payload.itemId) return payload.itemId;
+    return file ? this.byFile.get(file) || null : null;
   }
 
   _settle(itemId, value) {
     this.started.delete(itemId);
+    // Rejections may finish before Chromium announces a start.
+    const sw = this.startWaiters.get(itemId);
+    if (sw) {
+      this.startWaiters.delete(itemId);
+      clearTimeout(sw.timer);
+      sw.resolve({ itemId });
+    }
     const w = this.waiters.get(itemId);
-    if (!w) { this.early.set(itemId, value); return; } // held until await() asks
+    if (!w) { this._holdEarly(itemId, value); return; } // held until await() asks
     this.waiters.delete(itemId);
     if (w.timer) clearTimeout(w.timer);
     w.resolve(value);
+  }
+
+  /**
+   * A result nobody has asked for yet.
+   *
+   * Bounded, because not every one of these is ever collected: an attempt that
+   * has already moved on never calls await(), and over a multi-hour run those
+   * accumulate. Oldest out first - a stale result is worth less than a fresh
+   * one, and the waiter for it is long gone.
+   */
+  _holdEarly(itemId, value) {
+    this.early.set(itemId, value);
+    while (this.early.size > this.earlyCap) {
+      const oldest = this.early.keys().next().value;
+      if (oldest === undefined) break;
+      this.early.delete(oldest);
+    }
   }
 
   /**
@@ -145,54 +193,53 @@ export class DownloadTracker {
    * webview that started it is free to go and search something else.
    */
   awaitStart(itemId, signal) {
+    if (signal?.aborted) return Promise.resolve(null);
     if (this.started.has(itemId) || this.early.has(itemId)) return Promise.resolve({ itemId });
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        this.startWaiters.delete(itemId);
-        resolve(null);
-      }, this.startTimeoutMs);
-      this.startWaiters.set(itemId, { resolve, timer });
-      if (signal) {
-        signal.addEventListener('abort', () => {
-          const w = this.startWaiters.get(itemId);
-          if (!w) return;
-          this.startWaiters.delete(itemId);
-          clearTimeout(w.timer);
-          resolve(null);
-        }, { once: true });
-      }
-    });
+    return this._wait(this.startWaiters, itemId, signal, false);
   }
 
   /** Resolves with the finished download, or null if none ever started. */
   await(itemId, signal) {
+    if (signal?.aborted) return Promise.resolve(null);
     // Already finished while the click was still returning.
     if (this.early.has(itemId)) {
       const value = this.early.get(itemId);
       this.early.delete(itemId);
       return Promise.resolve(value);
     }
+    return this._wait(this.waiters, itemId, signal, this.started.has(itemId));
+  }
+
+  _wait(map, itemId, signal, started) {
+    // Replacing a wait must release the old promise, not orphan it forever.
+    map.get(itemId)?.resolve(null);
     return new Promise((resolve) => {
-      // Only the START is on a deadline. If awaitStart() already saw it begin,
-      // this is a wait for bytes, and bytes take as long as they take.
-      const alreadyStarted = this.started.has(itemId);
-      const timer = alreadyStarted ? null : setTimeout(() => {
-        this.waiters.delete(itemId);
-        resolve(null); // the click never became a transfer
-      }, this.startTimeoutMs);
-
-      this.waiters.set(itemId, { resolve, timer, started: alreadyStarted });
-
-      if (signal) {
-        signal.addEventListener('abort', () => {
-          const w = this.waiters.get(itemId);
-          if (!w) return;
-          this.waiters.delete(itemId);
-          clearTimeout(w.timer);
-          resolve(null);
-        }, { once: true });
-      }
+      const abort = () => waiter.resolve(null);
+      const waiter = {
+        started, timer: null,
+        resolve: (value) => {
+          if (map.get(itemId) === waiter) map.delete(itemId);
+          clearTimeout(waiter.timer);
+          signal?.removeEventListener('abort', abort);
+          resolve(value);
+        },
+      };
+      map.set(itemId, waiter);
+      if (!started) waiter.timer = setTimeout(() => waiter.resolve(null), this.startTimeoutMs);
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) abort();
     });
+  }
+
+  dispose() {
+    for (const [channel, handler] of this._handlers) this._ipc.removeListener?.(channel, handler);
+    this._handlers.clear();
+    for (const waiter of [...this.waiters.values(), ...this.startWaiters.values()]) waiter.resolve(null);
+    this.byFile.clear();
+    this.started.clear();
+    this.early.clear();
+    this.onStarted = null;
+    this.onProgress = null;
   }
 }
 
@@ -202,13 +249,9 @@ export function ipcAdapter(ipcRenderer, tracker) {
     clearDownloadContext(id) { ipcRenderer.send('clear-download-context', id); },
     awaitDownload(itemId, signal) { return tracker.await(itemId, signal); },
     awaitDownloadStart(itemId, signal) { return tracker.awaitStart(itemId, signal); },
-    searchYouTube(query, limit) { return ipcRenderer.invoke('yt-search', { query, limit }); },
-    searchSoundCloud(query, limit) { return ipcRenderer.invoke('sc-search', { query, limit }); },
-    searchJamendo(query, limit) { return ipcRenderer.invoke('jamendo-search', { query, limit }); },
     cancelDownload(itemId) { ipcRenderer.send('download-cancel-item', itemId); },
     listResumableTransfers() { return ipcRenderer.invoke('transfers-resumable'); },
     resumeTransfer(itemId) { return ipcRenderer.invoke('transfer-resume', itemId); },
-    downloadYouTube(payload) { return ipcRenderer.invoke('yt-download', payload); },
   };
 }
 

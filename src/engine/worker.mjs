@@ -10,22 +10,31 @@
 
 import { buildLucidaScript } from './cascade-lucida.mjs';
 import { buildMonochromeScript } from './cascade-monochrome.mjs';
-import { pickYouTube } from './yt-fallback.mjs';
-import { SOURCE_LUCIDA, SOURCE_MONOCHROME, SOURCE_JAMENDO, SOURCE_SOUNDCLOUD, SOURCE_YOUTUBE, SOURCE_DIRECT } from './chain.mjs';
+import { SOURCE_MONOCHROME, SOURCE_SOUNDCLOUD, SOURCE_YOUTUBE, SOURCE_DIRECT } from './chain.mjs';
 
 export const DEFAULTS = {
   domReadyTimeoutMs: 45000,
   cascadeTimeoutMs: 90000,
-  monochromeCascadeTimeoutMs: 240000,
+  // Above the cascade script's own 90-poll (90s) ceiling, with headroom for the
+  // menu-click/remux overhead between candidates - not a second budget on top
+  // of it. It used to be 240s, which meant a bad track could park a slot for
+  // up to 8 minutes (two attempts) doing nothing anyone could see.
+  monochromeCascadeTimeoutMs: 100000,
   downloadStartTimeoutMs: 120000,
 };
+
+// How many alternate release pages one attempt may fall back to before the
+// store is given up. Two, not more: each one is a full page load, and by the
+// third-best hit the scorer's confidence is thin enough that the next store is
+// the better bet.
+export const MAX_ALTERNATE_HOPS = 2;
 
 export function lucidaSearchUrl(query, service) {
   return `https://lucida.to/search?query=${encodeURIComponent(query)}&service=${service}`;
 }
 
 export function monochromeSearchUrl(query) {
-  return `https://monochrome.tf/search/${encodeURIComponent(query)}`;
+  return `https://monochrome.st/search/${encodeURIComponent(query)}`;
 }
 
 export function urlForStep(step) {
@@ -37,12 +46,20 @@ class Aborted extends Error {
   constructor() { super('aborted'); this.name = 'Aborted'; }
 }
 
-function withTimeout(promise, ms, onTimeout) {
-  let timer;
-  return Promise.race([
-    promise.finally(() => clearTimeout(timer)),
-    new Promise((resolve) => { timer = setTimeout(() => resolve(onTimeout()), ms); }),
-  ]);
+function withTimeout(promise, ms, onTimeout, signal) {
+  return new Promise((resolve, reject) => {
+    let timer;
+    const finish = (fn, value) => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      fn(value);
+    };
+    const abort = () => finish(reject, new Aborted());
+    Promise.resolve(promise).then(value => finish(resolve, value), error => finish(reject, error));
+    if (signal?.aborted) { abort(); return; }
+    signal?.addEventListener('abort', abort, { once: true });
+    timer = setTimeout(() => finish(resolve, onTimeout()), ms);
+  });
 }
 
 export class Worker {
@@ -92,7 +109,10 @@ export class Worker {
     if (signal && signal.aborted) throw new Aborted();
     const started = Date.now();
     const base = { step, slot: this.slot };
-    const cancel = () => this.ipc.cancelDownload?.(item.id);
+    const cancel = () => {
+      this.ipc.cancelDownload?.(item.id);
+      this.view.reset?.(); // navigating away stops a cascade that could still click after cancellation
+    };
     signal?.addEventListener("abort", cancel, { once: true });
 
     try {
@@ -101,6 +121,7 @@ export class Worker {
         id: item.id, name: item.name, service: step.service,
         outcome: result.outcome, label: result.label || null,
         message: result.message || null, url: result.url || null,
+        candidates: result.candidates || null,
         ms: Date.now() - started,
       });
       return { ...base, ...result };
@@ -114,61 +135,11 @@ export class Worker {
   }
 
   _dispatch(item, step, signal) {
-    switch (step.source) {
-      case SOURCE_DIRECT:     return this._runDirect(item, step, signal);
-      case SOURCE_JAMENDO:    return this._runJamendo(item, step, signal);
-      case SOURCE_SOUNDCLOUD: return this._runMediaSearch(item, step, signal, 'soundcloud');
-      case SOURCE_YOUTUBE:    return this._runMediaSearch(item, step, signal, 'youtube');
-      default:                return this._runScraped(item, step, signal);
+    if ([SOURCE_DIRECT, SOURCE_SOUNDCLOUD, SOURCE_YOUTUBE].includes(step.source)
+        || [SOURCE_SOUNDCLOUD, SOURCE_YOUTUBE].includes(step.service)) {
+      return { outcome: 'provider-failed', message: 'YouTube and SoundCloud downloads are disabled. FLAC only.' };
     }
-  }
-
-  // Jamendo exposes direct FLAC download URLs through its official API, but
-  // only when the artist has enabled downloads. The main process performs that
-  // filtering; this side still applies the ordinary title/artist/duration gate
-  // with stricter thresholds because a wrong free track is not a fallback.
-  async _runJamendo(item, step, signal) {
-    const search = await this.ipc.searchJamendo(step.query, 10);
-    if (signal && signal.aborted) throw new Aborted();
-
-    const res = Array.isArray(search) ? { ok: true, results: search } : (search || { ok: false, results: [] });
-    if (!res.ok) {
-      return {
-        outcome: 'search-unavailable',
-        message: res.reason === 'not-configured'
-          ? 'add a Jamendo client ID in Settings'
-          : (res.message || res.reason || 'search unavailable'),
-      };
-    }
-    if (!res.results?.length) return { outcome: 'no-results' };
-
-    const { chosen, ranked } = pickYouTube(
-      { title: item.title, artist: item.artist, durationSec: item.durationSec },
-      res.results,
-      { minTitleScore: 1, maxDriftSec: 8 }
-    );
-    if (!chosen) {
-      const top = ranked[0];
-      return { outcome: 'no-match', label: top?.title || null, message: top?.reason || null };
-    }
-
-    const done = await this.ipc.downloadYouTube({
-      url: chosen.url,
-      service: SOURCE_JAMENDO,
-      itemId: item.id,
-      key: item.key,
-      folderName: item.folderName,
-      title: item.title,
-      artist: item.artist,
-      group: item.groupName || null,
-      sourcePage: chosen.sourcePage || null,
-      licenseUrl: chosen.licenseUrl || null,
-    });
-    if (signal && signal.aborted) throw new Aborted();
-    return {
-      outcome: 'completed', label: `${chosen.artist} — ${chosen.title}`,
-      via: 'jamendo-api', savePath: done?.savePath, file: done?.file, bytes: done?.bytes,
-    };
+    return this._runScraped(item, step, signal);
   }
 
   async _runScraped(item, step, signal) {
@@ -185,6 +156,8 @@ export class Worker {
       key: item.key,
       title: item.title,
       artist: item.artist,
+      durationSec: item.durationSec,
+      isrc: item.isrc,
       group: item.groupName || null,
       service: step.service,
       attemptService: step.service,
@@ -214,26 +187,39 @@ export class Worker {
       return { outcome: 'completed', label: outcome.label || null, savePath: done.savePath, file: done.file, bytes: done.bytes };
     } finally {
       this.ipc.clearDownloadContext(this.view.webContentsId);
+      // A timed-out injection keeps polling inside the page unless navigation
+      // destroys it. It must not trigger a late download under the next context.
+      this.view.reset?.();
     }
   }
 
   // Lucida is a two-page flow - search, then the release page - so a
   // 'navigating' outcome means "run again on the page it just went to".
   async _navigateAndInject(item, step, url, isMono, signal) {
-    const expected = { title: item.title, artist: item.artist };
+    const expected = { title: item.title, artist: item.artist, durationSec: item.durationSec, isrc: item.isrc };
     const build = isMono ? buildMonochromeScript : buildLucidaScript;
     const cascadeMs = isMono ? this.t.monochromeCascadeTimeoutMs : this.t.cascadeTimeoutMs;
 
     // Armed before navigating so the event cannot land in the gap between the
     // call and the listener.
     let ready = this._nextDomReady();
-    this.view.navigate(url);
+
+    // Release pages the search scored as acceptable but did not navigate to.
+    // The Lucida cascade has always returned these - a release page can be a
+    // dead end, listed but carrying no usable download control, and that is a
+    // fact about the PAGE rather than about the track - but nothing ever read
+    // the field, so one dead release page wrote off the whole store.
+    let alternates = [];
+    let last = { outcome: 'navigation-exhausted' };
 
     try {
-      for (let hop = 0; hop < 2; hop++) {
+      this.view.navigate(url);
+      for (let hop = 0; hop < 3 + MAX_ALTERNATE_HOPS; hop++) {
         if (signal && signal.aborted) throw new Aborted();
-        const arrived = await withTimeout(ready, this.t.domReadyTimeoutMs, () => null);
-        if (arrived === null) return { outcome: 'navigation-timeout' };
+        const arrived = await withTimeout(ready, this.t.domReadyTimeoutMs, () => null, signal);
+        // Only the FIRST page failing to arrive says the store is unreachable.
+        // Later on we already have a verdict worth reporting.
+        if (arrived === null) return hop === 0 ? { outcome: 'navigation-timeout' } : last;
 
         // Re-arm BEFORE injecting. The search cascade navigates by assigning
         // location.href from inside the page, so the release page's dom-ready
@@ -242,15 +228,30 @@ export class Worker {
         ready.cancel();
         ready = this._nextDomReady();
 
-        const res = await this._inject(build(expected, {}), cascadeMs);
+        const res = await this._inject(build(expected, {}), cascadeMs, signal);
         const outcome = (res && typeof res === 'object') ? res : { outcome: String(res) };
 
         // 'navigating' means the page moved itself to the release page; loop
         // round and run the cascade again there. No navigate() - it already went.
-        if (outcome.outcome === 'navigating') continue;
-        return outcome;
+        if (outcome.outcome === 'navigating') {
+          if (Array.isArray(outcome.alternates)) alternates = outcome.alternates.slice();
+          continue;
+        }
+        if (outcome.outcome === 'download-triggered' || /^clicked-/.test(outcome.outcome)) return outcome;
+
+        // A release page that yielded nothing. Try the next hit the search was
+        // willing to accept before giving the store up.
+        last = outcome;
+        if (!alternates.length) return outcome;
+        const href = alternates.shift();
+        this.log('attempt.alternate', {
+          id: item.id, service: step.service, outcome: outcome.outcome, url: href,
+        });
+        ready.cancel();
+        ready = this._nextDomReady();
+        this.view.navigate(href);
       }
-      return { outcome: 'navigation-exhausted' };
+      return last;
     } finally {
       // Whatever happened, this attempt's listener must not outlive it.
       ready.cancel();
@@ -274,7 +275,7 @@ export class Worker {
   // Electron rejects executeJavaScript when the frame goes away underneath it.
   // Burning a whole attempt on that would drop a store from the chain over a
   // timing accident, so it gets one quick second go.
-  async _inject(script, timeoutMs) {
+  async _inject(script, timeoutMs, signal) {
     for (let tries = 0; tries < 2; tries++) {
       const res = await withTimeout(
         this.view.executeJavaScript(script).then(
@@ -282,86 +283,13 @@ export class Worker {
           (e) => ({ ok: false, message: e && e.message })
         ),
         timeoutMs,
-        () => ({ ok: true, v: { outcome: 'timeout' } })
+        () => ({ ok: true, v: { outcome: 'timeout' } }), signal
       );
       if (res.ok) return res.v;
-      if (tries === 0) { await new Promise((r) => setTimeout(r, 400)); continue; }
+      if (tries === 0) { await withTimeout(new Promise(() => {}), 400, () => null, signal); continue; }
       const at = this.view.currentUrl ? this.view.currentUrl() : null;
       return { outcome: 'injection-failed', message: res.message, url: at };
     }
   }
 
-  // The track came in with the URL of a specific upload - there is nothing to
-  // search for and nothing to score, because the user already told us which
-  // recording they meant. A failure here is not a verdict on the track, so it
-  // falls through to the ordinary chain rather than ending it.
-  async _runDirect(item, step, signal) {
-    const url = step.url || item.mediaUrl;
-    if (!url) return { outcome: 'no-results' };
-    try {
-      const done = await this.ipc.downloadYouTube({
-        url,
-        service: step.service || SOURCE_SOUNDCLOUD,
-        itemId: item.id,
-        key: item.key,
-        folderName: item.folderName,
-        title: item.title,
-        artist: item.artist,
-        group: item.groupName || null,
-      });
-      if (signal && signal.aborted) throw new Aborted();
-      return {
-        outcome: 'completed', label: item.name || item.title, via: 'yt-dlp',
-        savePath: done && done.savePath, file: done && done.file, bytes: done && done.bytes,
-      };
-    } catch (err) {
-      if (err instanceof Aborted) throw err;
-      return { outcome: 'direct-failed', message: err && err.message };
-    }
-  }
-
-  /**
-   * A yt-dlp-backed search source: YouTube or SoundCloud. Both answer every
-   * query with SOMETHING, which is exactly why the scorer gates them - see
-   * yt-fallback.mjs. The two differ only in which search yt-dlp is asked to run
-   * and how a failure reads to the user, so they share this.
-   */
-  async _runMediaSearch(item, step, signal, kind) {
-    const search = kind === 'soundcloud'
-      ? await this.ipc.searchSoundCloud(step.query, 5)
-      : await this.ipc.searchYouTube(step.query, 5);
-    if (signal && signal.aborted) throw new Aborted();
-
-    // Older shape (a bare array) is still accepted so this keeps working if the
-    // main process has not been updated.
-    const res = Array.isArray(search) ? { ok: true, results: search } : (search || { ok: false, results: [] });
-    if (!res.ok) {
-      // The search never happened. Saying 'no-results' here would record "not
-      // on SoundCloud/YouTube" for a track nobody actually looked for.
-      return { outcome: 'search-unavailable', message: res.message || res.reason || 'search unavailable' };
-    }
-    const candidates = res.results || [];
-    if (!candidates.length) return { outcome: 'no-results' };
-
-    const { chosen, ranked } = pickYouTube(
-      { title: item.title, artist: item.artist, durationSec: item.durationSec },
-      candidates
-    );
-    if (!chosen) {
-      const top = ranked[0];
-      return { outcome: 'no-match', label: top ? top.title : null, message: top ? top.reason : null };
-    }
-
-    const done = await this.ipc.downloadYouTube({
-      url: chosen.url,
-      service: kind,
-      itemId: item.id,
-      key: item.key,
-      folderName: item.folderName,
-      title: item.title,
-      artist: item.artist,
-      group: item.groupName || null,
-    });
-    return { outcome: 'completed', label: chosen.title, via: 'yt-dlp', savePath: done && done.savePath, file: done && done.file, bytes: done && done.bytes };
-  }
 }

@@ -9,18 +9,17 @@ import { Controller } from './controller.mjs';
 import { Worker } from './worker.mjs';
 import { viewAdapter, ipcAdapter, DownloadTracker, ensureWorkerViews } from './electron-bridge.mjs';
 import { collectProfiles, reportPayload, profileSignature } from './profile-report.mjs';
+import { assignPlaylistFiles } from './profile-paths.mjs';
+import { buildSearchVariants } from './variants.mjs';
 
 export const DEFAULT_CONCURRENCY = 3;
 // How many finished-searching tracks may be in flight without holding a
 // webview - the fetch-ahead depth.
 //
-// It must be LARGER than the slot count, or the pipeline stalls exactly where
-// it is supposed to help: at 3 and 3, once three transfers are detached the
-// next chain waits for its own file inline, holding its slot, and three of
-// those park every webview on the network. Searching then stops dead until a
-// file lands, so the downloads run in visible batches of three with a gap after
-// each. At two batches ahead the slots keep fetching while the files drain, and
-// there is always something already fetched for the network to pick up.
+// Two batches of detached files give searches headroom while transfers drain.
+// When this limit is reached, the controller frees a waiting view as soon as
+// ANY detached file finishes; a slower file no longer blocks its own view until
+// completion when another transfer has already made room.
 //
 // Not unbounded, for two reasons: the queue would otherwise race arbitrarily
 // far ahead of the network, and every extra simultaneous transfer is one more
@@ -45,7 +44,7 @@ export function startEngine(opts) {
   const {
     ipcRenderer, container, services, log = () => {},
     concurrency = DEFAULT_CONCURRENCY, onChange, onDownloadStart, planOptions = {},
-    pipeline = true, maxTransfers = DEFAULT_MAX_TRANSFERS,
+    pipeline = true, maxTransfers = DEFAULT_MAX_TRANSFERS, keepTrying = false,
   } = opts;
 
   const tracker = new DownloadTracker(ipcRenderer);
@@ -65,6 +64,7 @@ export function startEngine(opts) {
     log,
     planOptions,
     maxTransfers: pipeline ? maxTransfers : 0,
+    keepTrying,
     awaitTransfer: (itemId, signal) => tracker.await(itemId, signal),
     cancelTransfer: (itemId) => ipc.cancelDownload(itemId),
   });
@@ -76,16 +76,23 @@ export function startEngine(opts) {
     if (onDownloadStart) onDownloadStart(itemId, payload);
   };
   tracker.onProgress = (itemId, received, total) => controller.noteProgress(itemId, received, total);
+  const basePause = controller.pause.bind(controller);
+  const baseResume = controller.resume.bind(controller);
+  controller.pause = () => { ipcRenderer.send('downloads-pause'); basePause(); };
+  controller.resume = () => { ipcRenderer.send('downloads-resume'); baseResume(); };
 
   // The folder's record of what it is missing, and why. The main process writes
   // the "downloaded" half itself when a file lands, but only the renderer knows
   // that a track ran out of sources - and this file is the only thing about a
   // failed track that survives the app closing.
-  const reported = new Set();
-  controller.subscribe(() => {
+  const cleanups = [];
+  const reported = new Map();
+  cleanups.push(controller.subscribe(() => {
+    if (controller.restoring) return;
+    for (const id of reported.keys()) if (!controller.getItem(id)) reported.delete(id);
     for (const rec of controller.getItems()) {
-      if (rec.status !== 'skipped' || reported.has(rec.item.id)) continue;
-      reported.add(rec.item.id);
+      if (rec.status !== 'skipped' || reported.get(rec.item.id) === rec.tried) continue;
+      reported.set(rec.item.id, rec.tried);
       ipcRenderer.send('report-track', {
         section: 'missing',
         folderName: rec.item.folderName,
@@ -99,7 +106,7 @@ export function startEngine(opts) {
         },
       });
     }
-  });
+  }));
 
   // The other half of that record, one level up: when every track a profile
   // queued has reached a terminal state, write the summary of the whole run
@@ -107,8 +114,12 @@ export function startEngine(opts) {
   // so retrying the missing tracks rewrites it rather than leaving the first,
   // now-wrong answer on disk.
   const profileSigs = new Map();
-  controller.subscribe(() => {
-    for (const group of collectProfiles(controller.getItems())) {
+  cleanups.push(controller.subscribe(() => {
+    if (controller.restoring) return;
+    const profiles = collectProfiles(controller.getItems());
+    const ids = new Set(profiles.map(group => group.id));
+    for (const id of profileSigs.keys()) if (!ids.has(id)) profileSigs.delete(id);
+    for (const group of profiles) {
       if (!group.done || !group.folderName) continue;
       const sig = profileSignature(group);
       if (profileSigs.get(group.id) === sig) continue;
@@ -121,9 +132,111 @@ export function startEngine(opts) {
         missing: group.missingCount,
       });
     }
+  }));
+
+  // Profile library manifest (library.json) and .m3u8 playlists:
+  // Synchronized whenever a track completes or changes state.
+  let librarySyncTimer = null;
+  const librarySignatures = new Map();
+  const folderArtwork = new Map();
+  cleanups.push(controller.subscribe(() => {
+    if (controller.restoring) return;
+    for (const rec of controller.items.values()) {
+      const { folderName, groupArtwork } = rec.item;
+      if (!folderName || !groupArtwork || folderArtwork.get(folderName) === groupArtwork) continue;
+      folderArtwork.set(folderName, groupArtwork);
+      ipcRenderer.send?.('playlist-artwork-sync', { folderName, url: groupArtwork });
+    }
+  }));
+  const syncLibraries = () => {
+    if (controller.restoring || !controller.profiles || !controller.profiles.size) return;
+    for (const prof of controller.profiles.values()) {
+      if (!prof.folderName) continue;
+      const profPlaylists = [];
+      for (const pl of controller.playlists.values()) {
+        if (pl.profileId === prof.id) {
+          profPlaylists.push({
+            id: pl.id,
+            name: pl.name,
+            artwork: pl.artwork || null,
+            file: pl.file || `Playlists/${String(pl.name || 'Playlist').replace(/[<>:"/\\|?*\x00-\x1f]+/g, '_').trim()}.m3u8`,
+            trackKeys: pl.trackKeys || [],
+          });
+        }
+      }
+
+      const profTracks = {};
+      const members = new Set(profPlaylists.flatMap(pl => pl.trackKeys));
+      for (const [key, track] of controller.tracks.entries()) {
+        if (members.has(key)) {
+          profTracks[key] = {
+            title: track.item.title,
+            artist: track.item.artist,
+            durationSec: track.item.durationSec,
+            image: track.item.image || null,
+            artworkPending: !!track.item.artworkPending,
+            service: track.item.service || null,
+            trackId: track.item.trackId || null,
+            isrc: track.item.isrc || null,
+            file: track.file ? (track.file.startsWith('Tracks/') ? track.file : `Tracks/${track.file}`) : null,
+            savePath: track.savePath || track.result?.savePath || null,
+            sourceFolder: track.item.profileFolder || controller.profiles.get(track.item.profileId)?.folderName || null,
+            bytes: track.bytes || null,
+            status: track.status === 'completed' ? 'downloaded' : track.status === 'skipped' ? 'failed' : track.status === 'cancelled' ? 'cancelled' : 'pending',
+          };
+        }
+      }
+
+      const state = {
+        version: 1,
+        profile: {
+          id: prof.id,
+          name: prof.name || prof.user,
+          user: prof.user,
+          service: prof.service,
+          image: prof.image || null,
+        },
+        tracks: profTracks,
+        playlists: profPlaylists,
+      };
+
+      const signature = JSON.stringify(state);
+      if (librarySignatures.get(prof.id) === signature) continue;
+      librarySignatures.set(prof.id, signature);
+      state.profile.updatedAt = new Date().toISOString();
+
+      ipcRenderer.send?.('profile-library-sync', {
+        folderName: prof.folderName,
+        state,
+      });
+    }
+  };
+  const flushLibraries = () => {
+    if (librarySyncTimer) { clearTimeout(librarySyncTimer); librarySyncTimer = null; }
+    syncLibraries();
+  };
+  ipcRenderer.on?.('flush-state', flushLibraries);
+  cleanups.push(() => ipcRenderer.removeListener?.('flush-state', flushLibraries));
+
+  cleanups.push(() => {
+    if (librarySyncTimer) {
+      clearTimeout(librarySyncTimer);
+      librarySyncTimer = null;
+      syncLibraries();
+    }
   });
 
-  if (onChange) controller.subscribe(() => onChange(controller));
+  cleanups.push(controller.subscribe(() => {
+    if (!controller.restoring && controller.profiles?.size) {
+      if (librarySyncTimer) return;
+      librarySyncTimer = setTimeout(() => {
+        librarySyncTimer = null;
+        syncLibraries();
+      }, 250);
+    }
+  }));
+
+  if (onChange) cleanups.push(controller.subscribe(() => onChange(controller)));
 
   // Growing the pool needs more webviews; shrinking leaves the extra ones
   // parked rather than destroying a view a slot may still be finishing in.
@@ -137,21 +250,28 @@ export function startEngine(opts) {
     baseSetConcurrency(want);
   };
 
-  attachPersistence(controller, ipcRenderer, log);
+  cleanups.push(attachPersistence(controller, ipcRenderer, log));
+  const baseDispose = controller.dispose.bind(controller);
+  controller.dispose = () => {
+    cleanups.forEach(cleanup => cleanup());
+    baseDispose();
+    tracker.dispose();
+    for (const view of container.querySelectorAll('webview.worker-view')) view.remove();
+  };
 
   controller.tracker = tracker;
   controller.workers = workers;
   return controller;
 }
 
-const PERSIST_DEBOUNCE_MS = 1500;
+const PERSIST_MAX_WAIT_MS = 1500;
 
 /**
  * Keep state/queue.json in step with the queue, and offer what it holds back on
  * the next launch.
  *
- * Completed tracks are not written: they are already in the manifest, and
- * replaying them would only make the next launch re-check files it knows about.
+ * Completed profile tracks retain their canonical records and memberships.
+ * Completed loose tracks are already recorded in the download manifest.
  * Skipped tracks ARE written, flagged, so they can be shown as missing without
  * being retried on every start - a skip means the whole chain was exhausted, and
  * paying that cost again on every launch to reach the same answer is what the
@@ -159,99 +279,171 @@ const PERSIST_DEBOUNCE_MS = 1500;
  */
 export function attachPersistence(controller, ipcRenderer, log = () => {}) {
   let timer = null;
+  let lastSaveAt = 0;
 
+  const serialize = r => ({
+    ...r.item,
+    transferService: r.transferService || r.step?.service || r.item.transferService || null,
+    status: r.status, statusText: r.statusText, tried: r.tried,
+    file: r.file || r.result?.file || null, savePath: r.savePath || r.result?.savePath || null,
+    bytes: r.bytes || r.result?.bytes || null, firstPlaylistId: r.firstPlaylistId,
+    skippedInEarlierRun: r.status === 'skipped',
+  });
   const snapshot = () => ({
-    v: 3,
+    v: 4,
     at: Date.now(),
     paused: controller.paused,
-    items: controller.getItems()
+    items: [...controller.items.values()]
       .filter((r) => r.status !== 'completed' && r.status !== 'cancelled')
-      .map((r) => ({ ...r.item, status: r.status, statusText: r.statusText, tried: r.tried, skippedInEarlierRun: r.status === 'skipped' })),
+      .map(serialize),
+    profiles: [...controller.profiles.values()],
+    playlists: [...controller.playlists.values()],
+    tracks: [...controller.tracks.values()].map(serialize),
   });
 
-  controller.subscribe(() => {
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      const snap = snapshot();
-      if (snap.items.length) ipcRenderer.send('queue-save', snap);
-      else ipcRenderer.send('queue-clear'); // nothing outstanding: do not replay an empty run
-    }, PERSIST_DEBOUNCE_MS);
+  const save = () => {
+    if (controller.restoring) return;
+    lastSaveAt = Date.now();
+    const snap = snapshot();
+    if (snap.items.length || snap.playlists.length) ipcRenderer.send('queue-save', snap);
+    else ipcRenderer.send('queue-clear'); // nothing outstanding: do not replay an empty run
+  };
+
+  // A trailing debounce starves here. Status transitions arrive every few
+  // seconds across a long run, and each one used to push the 1.5s write further
+  // out - so queue.json froze at the last quiet moment, and the quit flush in
+  // main had nothing to flush: a crash took every change since the run started
+  // with it. So this is a throttle: the FIRST change schedules a write that runs
+  // no matter what arrives afterwards, and every write reads the latest state -
+  // changes are coalesced, never dropped. Steady activity costs one write per
+  // window; a quiet queue costs one write, just later.
+  const unsubscribe = controller.subscribe(() => {
+    if (controller.restoring) return;
+    if (timer) return;
+    const wait = Math.max(0, PERSIST_MAX_WAIT_MS - (Date.now() - lastSaveAt));
+    timer = setTimeout(() => { timer = null; save(); }, wait);
   });
 
   // Removal is a structural change: save it immediately through both debounce
   // layers so closing the app cannot bring the deleted playlist back.
-  const baseRemove = controller.remove.bind(controller);
-  controller.remove = (ids) => {
-    const count = baseRemove(ids);
-    if (count) {
-      clearTimeout(timer);
-      const snap = snapshot();
-      if (snap.items.length) ipcRenderer.send('queue-save', snap, true);
-      else ipcRenderer.send('queue-clear');
+  const saveRemoval = () => {
+    for (const id of controller.profiles.keys()) {
+      if (![...controller.playlists.values()].some(pl => pl.profileId === id)) controller.profiles.delete(id);
     }
-    return count;
+    clearTimeout(timer);
+    timer = null;
+    lastSaveAt = Date.now();
+    const snap = snapshot();
+    if (snap.items.length || snap.playlists.length) ipcRenderer.send('queue-save', snap, true);
+    else ipcRenderer.send('queue-clear');
   };
+  let removalDepth = 0;
+  for (const method of ['remove', 'removeGroup']) {
+    const baseRemove = controller[method].bind(controller);
+    controller[method] = ids => {
+      removalDepth++;
+      try {
+        const count = baseRemove(ids);
+        if (count && removalDepth === 1) saveRemoval();
+        return count;
+      } finally { removalDepth--; }
+    };
+  }
+
+  // The quit handshake. Main flushes its own writers on before-quit, but only
+  // this side can supply the queue snapshot - and once the window is gone, the
+  // timer holding it never fires. Main says "now or never"; this lands the
+  // write immediately so the flush a few hundred ms later picks it up.
+  const onFlush = () => {
+      if (timer) { clearTimeout(timer); timer = null; }
+      save();
+  };
+  if (typeof ipcRenderer.on === 'function') ipcRenderer.on('flush-state', onFlush);
 
   controller.restore = async () => {
-    const snap = await ipcRenderer.invoke('queue-load').catch(() => null);
-    const items = (snap && snap.items) || [];
-    if (!items.length) return { restored: 0, alreadyDone: 0, staySkipped: 0 };
-
-    // A file the user has since deleted must download again, and one downloaded
-    // by another means must not.
-    let checks = [];
+    controller.restoring = true;
+    let snap;
     try {
-      checks = await ipcRenderer.invoke('downloads-check',
-        items.map((i) => ({ key: i.key, folderName: i.folderName, title: i.title })));
-    } catch (e) { checks = []; }
-
-    // Files that were still coming down when the app last closed. Chromium can
-    // pick these up at the byte they stopped at, so they must not go back
-    // through the chain as if nothing had been fetched.
-    let resumable = [];
-    try { resumable = (await ipcRenderer.invoke('transfers-resumable')) || []; }
-    catch (e) { resumable = []; }
-    const byId = new Map(resumable.map((t) => [t.itemId, t]));
-
-    const fresh = [];
-    const toResume = [];
-    let alreadyDone = 0, staySkipped = 0;
-    items.forEach((item, i) => {
-      if (checks[i] && checks[i].done) { alreadyDone++; return; }
-      if (item.skippedInEarlierRun) {
-        staySkipped++;
-        controller.items.set(item.id, {
-          item, status: 'skipped', statusText: item.statusText || 'Missing from an earlier run',
-          tried: item.tried || [], plan: null, step: null, result: null,
-        });
-        return;
+      snap = normalizeQueueSnapshot(await ipcRenderer.invoke('queue-load').catch(() => null));
+      if (!snap.items.length && !snap.tracks.length) return { restored: 0, resumed: 0, alreadyDone: 0, staySkipped: 0 };
+      controller.pause();
+      const resumable = await ipcRenderer.invoke('transfers-resumable').catch(() => []) || [];
+      const byId = new Map(resumable.map(t => [t.itemId, t]));
+      const all = [...snap.items, ...snap.tracks];
+      const checks = await ipcRenderer.invoke('downloads-check', all.map(i => ({
+        key: i.key, folderName: i.folderName, title: i.title, artist: i.artist, durationSec: i.durationSec, isrc: i.isrc, savePath: i.savePath, bytes: i.bytes,
+      })), { restore: true }).catch(() => []) || [];
+      let alreadyDone = 0, staySkipped = 0, restored = 0, resumed = 0;
+      const toResume = [];
+      const prepared = all.map((item, i) => {
+        if (byId.has(item.id) && item.status !== 'cancelled') {
+          toResume.push(item.id);
+          return { ...item, status: 'queued' };
+        }
+        if (checks[i]?.done) { alreadyDone++; return { ...item, ...checks[i], status: 'completed' }; }
+        if (item.skippedInEarlierRun || item.status === 'skipped') { staySkipped++; return { ...item, status: 'skipped' }; }
+        if (item.status === 'cancelled') return item;
+        restored++;
+        return { ...item, status: 'queued' };
+      });
+      const profileTracks = new Map(prepared.slice(snap.items.length).map(t => [t.key || t.id, t]));
+      for (const profile of snap.profiles) {
+        const playlists = snap.playlists.filter(pl => pl.profileId === profile.id);
+        const keys = new Set(playlists.flatMap(pl => pl.trackKeys));
+        controller.addProfile(profile, playlists, new Map([...profileTracks].filter(([key]) => keys.has(key))), { queue: false });
       }
-      if (byId.has(item.id)) { toResume.push(item); return; }
-      fresh.push(item);
-    });
-
-    // Pause before add() submits work; pausing after submission is too late.
-    if (snap && snap.paused) controller.pause();
-    const restored = controller.add(fresh);
-
-    // Adopt first, THEN ask the main process to start pulling: the record has to
-    // exist before the first progress event arrives, or the bytes have nowhere
-    // to be reported against.
-    let resumed = 0;
-    for (const item of toResume) {
-      if (!controller.adoptTransfer(item, byId.get(item.id))) { controller.add([item]); continue; }
-      resumed++;
-      Promise.resolve(ipcRenderer.invoke('transfer-resume', item.id))
-        .then((res) => {
-          // Nothing to resume after all - hand it to the chain rather than
-          // leaving a row that says "downloading" with nothing behind it.
-          if (!res || !res.ok) controller.failTransfer(item.id, 'resume-unavailable');
-        })
-        .catch(() => controller.failTransfer(item.id, 'resume-unavailable'));
+      for (const item of prepared.slice(0, snap.items.length)) {
+        if (item.status === 'completed') continue;
+        controller.add(item);
+        const rec = controller.getItem(item.id);
+        if (!rec) continue;
+        rec.status = item.status;
+        rec.statusText = item.statusText || (item.status === 'skipped' ? 'Missing from an earlier run' : 'Waiting in queue');
+        rec.tried = item.tried || [];
+        if (['skipped', 'cancelled'].includes(item.status)) controller.pool.cancel(item.id);
+      }
+      const resumeIds = new Set(toResume);
+      controller.pool.submit([...controller.tracks.values()].filter(rec => rec.status === 'queued' && !resumeIds.has(rec.item.id)).map(rec => rec.item));
+      for (const id of toResume) {
+        const item = controller.getItem(id)?.item;
+        if (!item || !controller.adoptTransfer(item, byId.get(id))) continue;
+        resumed++;
+        Promise.resolve(ipcRenderer.invoke('transfer-resume', id)).then(result => {
+          if (!result?.ok) controller.failTransfer(id, 'resume-unavailable');
+        }).catch(() => controller.failTransfer(id, 'resume-unavailable'));
+      }
+      log('session.restore', { restored, resumed, alreadyDone, staySkipped, paused: !!snap.paused });
+      return { restored, resumed, alreadyDone, staySkipped };
+    } finally {
+      controller.restoring = false;
+      if (snap && !snap.paused) controller.resume();
+      controller._emit();
     }
-
-    if (staySkipped || resumed) controller._emit();
-    log('session.restore', { restored, resumed, alreadyDone, staySkipped, paused: !!(snap && snap.paused) });
-    return { restored, resumed, alreadyDone, staySkipped };
   };
+  return () => {
+    clearTimeout(timer);
+    unsubscribe();
+    ipcRenderer.removeListener?.('flush-state', onFlush);
+  };
+}
+
+// Upgrade old display-row snapshots without flattening shared profile tracks.
+export function normalizeQueueSnapshot(snapshot) {
+  const snap = snapshot || {};
+  const refreshQueries = item => {
+    const variants = buildSearchVariants(item.title, item.artist, item.album);
+    // Upgrade generated queries from old queues while keeping custom searches.
+    return item.searchVariants?.[0] === variants[0] ? { ...item, searchVariants: variants } : item;
+  };
+  if (snap.v >= 4) return { ...snap, items: (snap.items || []).map(refreshQueries), tracks: (snap.tracks || []).map(refreshQueries), profiles: snap.profiles || [], playlists: assignPlaylistFiles(snap.playlists || []) };
+  const profiles = new Map(), playlists = new Map(), tracks = new Map(), items = [];
+  for (const item of snap.items || []) {
+    if (!item.profileId || !item.groupId || item.id !== item.key) { items.push(item); continue; }
+    const folderName = item.profileFolder || String(item.folderName || '').replace(/\/Playlists$/, '');
+    profiles.set(item.profileId, { id: item.profileId, name: item.profileName, user: item.profileUser, service: item.profileService, image: item.profileArtwork, folderName });
+    if (!playlists.has(item.groupId)) playlists.set(item.groupId, { id: item.groupId, profileId: item.profileId, name: item.groupName, artwork: item.groupArtwork, folderName: `${folderName}/Playlists`, trackKeys: [] });
+    playlists.get(item.groupId).trackKeys.push(item.key);
+    if (!tracks.has(item.key)) tracks.set(item.key, { ...item, folderName: `${folderName}/Tracks`, profileFolder: folderName });
+  }
+  return { ...snap, v: 4, items: items.map(refreshQueries), profiles: [...profiles.values()], playlists: assignPlaylistFiles([...playlists.values()]), tracks: [...tracks.values()].map(refreshQueries) };
 }

@@ -84,7 +84,8 @@ export function collectProfiles(items) {
       pl.counts.pending++;
     }
   }
-  return [...profiles.values()].map(({ byPlaylist, ...rest }) => ({
+  // byPlaylist is the working index and is deliberately dropped from the result.
+  return [...profiles.values()].map(({ byPlaylist: _byPlaylist, ...rest }) => ({
     ...rest,
     done: rest.total > 0 && rest.finishedCount === rest.total,
   }));
