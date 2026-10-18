@@ -361,13 +361,15 @@ export default function SettingsView({ config, setConfig, onToast, throttleOff =
                 <label htmlFor="vol">Volume</label>
                 <input
                   id="vol" type="range" min="0" max="1" step="0.05"
-                  value={local.soundVolume ?? 0.35}
+                  value={rangeValue('soundVolume', 0.35)}
                   onChange={(e) => {
                     const v = Number(e.target.value);
-                    patch({ soundVolume: v });
+                    setDragging((d) => ({ ...d, soundVolume: v }));
                     configureSounds({ volume: v });
                   }}
-                  onMouseUp={() => play('complete')}
+                  onPointerUp={onRangeCommit('soundVolume', () => play('complete'))}
+                  onKeyUp={onRangeCommit('soundVolume', () => play('complete'))}
+                  onBlur={onRangeCommit('soundVolume')}
                 />
               </div>
             )}

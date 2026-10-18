@@ -2,6 +2,32 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Controller } from '../src/engine/controller.mjs';
 import { attachPersistence } from '../src/engine/renderer-integration.mjs';
+import { displayedService } from '../src/engine/source-display.mjs';
+
+test('restored downloads keep metadata separate from the actual audio provider', async () => {
+  for (const verifiedService of ['amazon', null]) {
+    const c = new Controller();
+    const snap = { v: 4, paused: true, items: [],
+      profiles: [{ id: 'p', name: 'Profile', folderName: 'Profile' }],
+      playlists: [{ id: 'pl', profileId: 'p', name: 'Mix', trackKeys: ['song'] }],
+      tracks: [{ id: 'song', key: 'song', title: 'Song', artist: 'Artist', service: 'spotify',
+        transferService: 'qobuz', status: 'completed', savePath: '/fixture/song.flac', bytes: 100 }],
+    };
+    const off = attachPersistence(c, { send() {}, invoke: async name => {
+      if (name === 'queue-load') return snap;
+      if (name === 'downloads-check') return [{ done: true, file: 'song.flac', savePath: '/fixture/song.flac', bytes: 100, service: verifiedService }];
+      return [];
+    } });
+    try {
+      await c.restore();
+      const rec = c.getItem('song');
+      assert.equal(rec.status, 'completed');
+      assert.equal(rec.item.service, 'spotify');
+      assert.equal(displayedService(rec), verifiedService || 'qobuz');
+      assert.equal(displayedService(c.getPlaylistItems('pl')[0]), verifiedService || 'qobuz');
+    } finally { off(); c.dispose(); }
+  }
+});
 
 test('restores a paused queue without starting it and keeps missing tracks visible', async () => {
   let runs = 0;

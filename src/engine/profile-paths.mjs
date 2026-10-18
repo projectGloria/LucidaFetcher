@@ -12,22 +12,27 @@ const suffix = id => {
   return (hash >>> 0).toString(16).padStart(8, '0');
 };
 
+const stripPlaylistPath = value => clean(
+  String(value || '').replace(/\\/g, '/').replace(/^Playlists\/+/i, '').split('/').pop().replace(/\.m3u8$/i, '')
+);
+
 export function playlistFileName(name, id) {
-  return `Playlists/${clean(name)} [${suffix(id)}].m3u8`;
+  return `${clean(name)} [${suffix(id)}]`;
 }
 
 export function assignPlaylistFiles(playlists = []) {
-  const proposed = playlists.map(pl => pl.file
-    ? `Playlists/${clean(String(pl.file).replace(/\\/g, '/').split('/').pop().replace(/\.m3u8$/i, ''))}.m3u8`
-    : playlistFileName(pl.name, pl.id));
+  const proposed = playlists.map(pl => {
+    const raw = pl.folder || pl.file;
+    return raw ? stripPlaylistPath(raw) : clean(pl.name);
+  });
   const counts = new Map();
   for (const name of proposed) counts.set(name.toLowerCase(), (counts.get(name.toLowerCase()) || 0) + 1);
   const used = new Set();
   return playlists.map((pl, i) => {
-    let file = counts.get(proposed[i].toLowerCase()) > 1 ? playlistFileName(pl.name, pl.id) : proposed[i];
-    const base = file.slice(0, -5);
-    for (let n = 1; used.has(file.toLowerCase()); n++) file = `${base} (${n}).m3u8`;
-    used.add(file.toLowerCase());
-    return { ...pl, file };
+    let folder = counts.get(proposed[i].toLowerCase()) > 1 ? playlistFileName(pl.name || proposed[i], pl.id) : proposed[i];
+    const base = folder;
+    for (let n = 1; used.has(folder.toLowerCase()); n++) folder = `${base} (${n})`;
+    used.add(folder.toLowerCase());
+    return { ...pl, folder, file: folder };
   });
 }

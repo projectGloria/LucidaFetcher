@@ -1,6 +1,7 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App.jsx';
+import RenderBoundary from './components/RenderBoundary.jsx';
 import { installRendererLogging } from './diagnostics.js';
 import './styles.css';
 
@@ -18,6 +19,6 @@ createRoot(document.getElementById('root')).render(
   // outside the tree and is only subscribed to, so a double-mount cannot start
   // a scrape twice or tear down a transfer in flight.
   <React.StrictMode>
-    <App />
+    <RenderBoundary><App /></RenderBoundary>
   </React.StrictMode>
 );

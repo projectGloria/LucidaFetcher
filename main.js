@@ -290,6 +290,8 @@ app.on('web-contents-created', (event, contents) => {
     webPreferences.nodeIntegration = false;
     webPreferences.nodeIntegrationInSubFrames = false;
     webPreferences.contextIsolation = true;
+    // Hidden workers and a tray-hidden window still own active searches.
+    webPreferences.backgroundThrottling = false;
     params.allowpopups = false;
   });
 
@@ -486,6 +488,7 @@ function rememberTransfer(item, ctx, savePath) {
       ctx: {
         itemId: ctx.itemId, key: ctx.key || null, folderName: ctx.folderName || null,
         title: ctx.title || null, artist: ctx.artist || null, group: ctx.group || null,
+        durationSec: ctx.durationSec || null, isrc: ctx.isrc || null,
         service: ctx.service || null, attemptService: ctx.attemptService || null,
         originalService: ctx.originalService || null, sourceUrl: ctx.sourceUrl || null,
         artworkUrl: ctx.artworkUrl || null,
@@ -602,22 +605,34 @@ function loadState() {
   // Bound manifest growth by dropping entries whose file is gone - but not on
   // the critical path. See pruneManifest.
   setTimeout(() => { pruneManifest().catch(() => {}); }, 2000);
-  setTimeout(() => { cleanLeftoverPartFiles(downloadPath); }, 2500);
+  setTimeout(() => { cleanLeftoverPartFiles(downloadPath).catch(err => logEvent('cleanup.failed', { message: err.message })); }, 2500);
 }
 
-function cleanLeftoverPartFiles(dir) {
-  try {
-    if (!fs.existsSync(dir)) return;
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-    for (const ent of entries) {
-      const full = path.join(dir, ent.name);
-      if (ent.isDirectory()) {
-        cleanLeftoverPartFiles(full);
-      } else if (ent.isFile() && (ent.name.endsWith('.part') || ent.name.endsWith('.crdownload'))) {
-        try { fs.unlinkSync(full); logEvent('cleanup.part', { file: full }); } catch {}
-      }
+async function cleanLeftoverPartFiles(dir) {
+  // A library can have thousands of folders. Walk asynchronously, and leave
+  // current/resumable transfers alone even if they have a partial extension.
+  const protectedPaths = new Set(Object.values(transfers).filter(t => t?.savePath).map(t => savePathKey(t.savePath)));
+  const folders = [dir];
+  while (folders.length) {
+    if (quitting) return;
+    let entries;
+    const folder = folders.pop();
+    try { entries = await fs.promises.opendir(folder); } catch { continue; }
+    for await (const ent of entries) {
+      if (quitting) return;
+      const full = path.join(folder, ent.name);
+      if (ent.isDirectory()) { folders.push(full); continue; }
+      if (!ent.isFile() || !/\.(part|crdownload)$/i.test(ent.name)) continue;
+      const key = savePathKey(full);
+      if (protectedPaths.has(key) || liveSavePaths.has(key)) continue;
+      try {
+        const stat = await fs.promises.stat(full);
+        if (stat.mtimeMs >= SESSION_START || liveSavePaths.has(key)) continue;
+        await fs.promises.unlink(full);
+        logEvent('cleanup.part', { file: full });
+      } catch { /* disappeared or inaccessible */ }
     }
-  } catch {}
+  }
 }
 
 /**
@@ -1001,11 +1016,12 @@ function folderFor(folderName) {
 
 function checkDownloaded(q, names = null, scan = false) {
   if (!q) return { done: false };
+  const rec = q.key ? manifest[q.key] : null;
   const pendingPath = file => Object.values(transfers).some(t => t?.savePath && savePathKey(t.savePath) === savePathKey(file));
   if (q.savePath && q.bytes > 0 && !pendingPath(q.savePath) && isCompleteFlacFile(q.savePath, q.bytes) && hasEmbeddedArtwork(q.savePath)) {
-    return { done: true, file: path.basename(q.savePath), savePath: q.savePath, bytes: q.bytes, via: 'recorded-file' };
+    const service = rec?.savePath && savePathKey(rec.savePath) === savePathKey(q.savePath) ? rec.service : null;
+    return { done: true, file: path.basename(q.savePath), savePath: q.savePath, bytes: q.bytes, via: 'recorded-file', service: service || null };
   }
-  const rec = q.key ? manifest[q.key] : null;
   if (rec && rec.savePath) {
     if (pendingPath(rec.savePath)) return { done: false };
     if (!['youtube', 'soundcloud'].includes(rec.service) && isCompleteFlacFile(rec.savePath, rec.bytes) && hasEmbeddedArtwork(rec.savePath)) return { done: true, file: rec.file, via: 'manifest', service: rec.service || null, sourceUrl: rec.sourceUrl || null, savePath: rec.savePath, bytes: rec.bytes || null };
@@ -1317,26 +1333,43 @@ ipcMain.handle('profile-library-load', async (event, folderName) => {
   }
 });
 
+// A copy/validation pass can take longer than the renderer's update interval.
+// Retain one latest snapshot per destination while its current pass finishes.
+const pendingProfileSyncs = new Map();
 ipcMain.on('profile-library-sync', (event, payload) => {
   if (!payload || !payload.folderName || !payload.state) return;
   const profileDir = folderFor(payload.folderName);
-  const state = structuredClone(payload.state);
+  const key = savePathKey(profileDir);
+  const existing = pendingProfileSyncs.get(key);
+  if (existing) { existing.state = structuredClone(payload.state); return; }
+  const pending = { state: structuredClone(payload.state) };
+  pendingProfileSyncs.set(key, pending);
   // Register before the dynamic import so quit waits for the entire output.
   queueStateWrite(path.join(profileDir, 'profile-output'), async () => {
-    const { syncProfileLibrary } = await getLibraryEngine();
-    await syncProfileLibrary(profileDir, state, {
-      validateFile: (file, bytes) => isCompleteFlacFile(file, bytes) && hasEmbeddedArtwork(file),
-      saveArtwork: (url, file) => { downloadArtwork(url, file); },
-      sourceFolder: folderFor,
-      reserveCopy: file => {
-        const key = savePathKey(file);
-        if (liveSavePaths.has(key)) return null;
-        const owner = {};
-        liveSavePaths.set(key, owner);
-        return () => { if (liveSavePaths.get(key) === owner) liveSavePaths.delete(key); };
-      },
-    });
-    logEvent('profile.library.synced', { folder: payload.folderName, playlists: state.playlists.length });
+    try {
+      const { syncProfileLibrary } = await getLibraryEngine();
+      while (pending.state) {
+        const state = pending.state;
+        pending.state = null;
+        try {
+          await syncProfileLibrary(profileDir, state, {
+            validateFile: (file, bytes) => isCompleteFlacFile(file, bytes) && hasEmbeddedArtwork(file),
+            saveArtwork: (url, file) => { downloadArtwork(url, file); },
+            sourceFolder: folderFor,
+            reserveCopy: file => {
+              const targetKey = savePathKey(file);
+              if (liveSavePaths.has(targetKey)) return null;
+              const owner = {};
+              liveSavePaths.set(targetKey, owner);
+              return () => { if (liveSavePaths.get(targetKey) === owner) liveSavePaths.delete(targetKey); };
+            },
+          });
+          logEvent('profile.library.synced', { folder: payload.folderName, playlists: state.playlists.length });
+        } catch (error) {
+          logEvent('profile.library.sync.failed', { folder: payload.folderName, message: error.message });
+        }
+      }
+    } finally { pendingProfileSyncs.delete(key); }
   });
 });
 
@@ -1814,7 +1847,7 @@ function pumpArtwork() {
 
 ipcMain.on('playlist-artwork-sync', (event, payload) => {
   if (!payload?.folderName || !payload.url) return;
-  downloadArtwork(payload.url, path.join(folderFor(payload.folderName), 'cover.jpg'));
+  downloadArtwork(payload.url, path.join(folderFor(payload.folderName), 'cover.png'));
 });
 
 function downloadArtwork(url, artPath) {
@@ -1832,7 +1865,10 @@ function downloadArtwork(url, artPath) {
       const image = nativeImage.createFromBuffer(buf);
       if (image.isEmpty()) throw new Error('Cannot decode artwork');
       await fs.promises.mkdir(path.dirname(artPath), { recursive: true });
-      await fs.promises.writeFile(tmp, image.toJPEG(90));
+      const encoded = /\.jpe?g$/i.test(artPath) || typeof image.toPNG !== 'function'
+        ? image.toJPEG(90)
+        : image.toPNG();
+      await fs.promises.writeFile(tmp, encoded);
       await fs.promises.rename(tmp, artPath);
       logEvent('artwork.saved', { url: finalUrl.origin + finalUrl.pathname, savePath: artPath });
     } catch (e) {
@@ -1934,7 +1970,7 @@ function handleWillDownload(event, item, webContents) {
       savePath = path.join(folderPath, fileName);
 
       if (ctx.artworkUrl) {
-        const artPath = path.join(folderPath, 'cover.jpg');
+        const artPath = path.join(folderPath, 'cover.png');
         if (!fs.existsSync(artPath)) {
           downloadArtwork(ctx.artworkUrl, artPath);
         }
@@ -2273,7 +2309,8 @@ function createWindow() {
     webPreferences: {
       webviewTag: true,
       nodeIntegration: true,
-      contextIsolation: false
+      contextIsolation: false,
+      backgroundThrottling: false,
     }
   });
 

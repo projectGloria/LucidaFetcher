@@ -16,20 +16,21 @@ const matches = (rec, filter) => {
   return rec.status === 'searching' || rec.status === 'ready' || rec.status === 'downloading' || rec.status === 'queued';
 };
 
-export default function QueueView({ onToast }) {
+export default function QueueView({ onToast, preferences = {}, onPreferencesChange }) {
   const tree = useProfileTree();
   const stats = useStats();
-  const [filter, setFilter] = useState('all');
-  // Collapsed rather than expanded, so a group's state survives it being
-  // filtered out and back in without the set having to be seeded.
-  const [collapsed, setCollapsed] = useState(() => new Set());
+  const filter = FILTERS.some(f => f.id === preferences?.filter) ? preferences.filter : 'all';
+  const collapsed = new Set(Array.isArray(preferences?.collapsed) ? preferences.collapsed : []);
+  // App owns these preferences and saves them in config.json, so unmounting
+  // this view or restarting the portable app does not reset the queue tree.
+  const save = (next) => onPreferencesChange({ filter, collapsed: [...collapsed], ...next });
   const controller = getController();
 
-  const toggle = (id) => setCollapsed((prev) => {
-    const next = new Set(prev);
+  const toggle = (id) => {
+    const next = new Set(collapsed);
     if (next.has(id)) next.delete(id); else next.add(id);
-    return next;
-  });
+    save({ collapsed: [...next] });
+  };
 
   const shape = (g) => ({ ...g, allRecords: g.records, totalRecords: g.records.length, records: g.records.filter((r) => matches(r, filter)) });
   // A profile survives the filter if any of its playlists does, so "Missing"
@@ -37,7 +38,7 @@ export default function QueueView({ onToast }) {
   // which is the list the user opened that filter to get.
   const visible = tree
     .map((node) => (node.kind === 'profile'
-      ? { ...node, groups: node.groups.map(shape).filter((g) => g.records.length) }
+      ? { ...node, totalGroups: node.groups.length, groups: node.groups.map(shape).filter((g) => g.records.length) }
       : { ...node, group: shape(node.group) }))
     .filter((node) => (node.kind === 'profile' ? node.groups.length : node.group.records.length));
   const visibleGroups = visible.flatMap((node) => (node.kind === 'profile' ? node.groups : [node.group]));
@@ -53,7 +54,7 @@ export default function QueueView({ onToast }) {
   // is not a thing anyone would sit through.
   const removeProfile = (node) => {
     if (!controller) return;
-    const n = node.groups.reduce((sum, g) => sum + controller.removeGroup(g.id), 0);
+    const n = controller.removeProfile(node.id);
     onToast(n
       ? `Removed ${n} track${n === 1 ? '' : 's'} from ${node.name}. Files already downloaded are untouched.`
       : 'Nothing to remove.');
@@ -75,7 +76,7 @@ export default function QueueView({ onToast }) {
             <button
               key={f.id}
               className={`btn btn-sm ${filter === f.id ? '' : 'btn-ghost'}`}
-              onClick={() => setFilter(f.id)}
+              onClick={() => save({ filter: f.id })}
               aria-pressed={filter === f.id}
             >
               {f.label}
@@ -96,7 +97,13 @@ export default function QueueView({ onToast }) {
             return (
               <button
                 className="btn btn-sm btn-ghost"
-                onClick={() => setCollapsed(allCollapsed ? new Set() : new Set(allCollapsibleIds))}
+                onClick={() => {
+                  const next = new Set(collapsed);
+                  for (const id of allCollapsibleIds) {
+                    if (allCollapsed) next.delete(id); else next.add(id);
+                  }
+                  save({ collapsed: [...next] });
+                }}
               >
                 {allCollapsed ? 'Expand all' : 'Collapse all'}
               </button>
@@ -191,7 +198,7 @@ function Profile({ node, collapsed, onToggle, isCollapsed, onToggleGroup, onRemo
         </button>
         {confirming ? (
           <button className="btn btn-sm btn-danger group-remove" onClick={() => { setConfirming(false); onRemove(); }}>
-            Remove {node.groups.length} playlists?
+            Remove all {node.totalGroups} playlists?
           </button>
         ) : (
           <button className="btn btn-sm btn-ghost btn-danger group-remove" onClick={() => setConfirming(true)}

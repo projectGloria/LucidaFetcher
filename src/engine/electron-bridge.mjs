@@ -130,11 +130,11 @@ export class DownloadTracker {
     });
 
     on('download-status', (event, payload) => {
-      const { file, status, savePath, bytes } = payload || {};
+      const { file, status, savePath, bytes, service } = payload || {};
       const itemId = this._idFor(payload, file);
       if (!itemId) return;
       if (file && this.byFile.get(file) === itemId) this.byFile.delete(file);
-      this._settle(itemId, { status, savePath, file, bytes });
+      this._settle(itemId, { status, savePath, file, bytes, service });
     });
   }
 

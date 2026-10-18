@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useMemo, useRef } from 'react';
 import { useItems, useTransferProgress } from '../engine.js';
 
 // One panel at the bottom of the window for whatever is transferring right now.
@@ -20,7 +20,15 @@ function fmtBytes(n, digits) {
 
 export default function DownloadDock() {
   useTransferProgress();
-  const items = [...new Map(useItems().map(rec => [rec.item.id, rec])).values()];
+  const items = useItems();
+  // Only structural changes rebuild the membership list. Progress changes the
+  // live getters on these records without expanding every playlist again.
+  const { moving, waiting, active } = useMemo(() => {
+    const unique = [...new Map(items.map(rec => [rec.item.id, rec])).values()];
+    const transferring = unique.filter(r => r.status === 'downloading');
+    const ready = unique.filter(r => r.status === 'ready');
+    return { moving: transferring, waiting: ready, active: [...transferring, ...ready] };
+  }, [items]);
   // Byte counters are cumulative, so a rate has to be derived from two
   // readings. They live in a ref because they are display detail: as state they
   // would re-render the dock on their own account as well as on every progress
@@ -31,9 +39,6 @@ export default function DownloadDock() {
   // Both belong in here: the panel answers "what is the app doing", and a track
   // that has been scraped and handed to the network is as much a live piece of
   // work as one whose bytes happen to be arriving this second.
-  const moving = items.filter((r) => r.status === 'downloading');
-  const waiting = items.filter((r) => r.status === 'ready');
-  const active = [...moving, ...waiting];
   if (!active.length) {
     if (samples.current.size) samples.current.clear();
     return null;
@@ -52,10 +57,10 @@ export default function DownloadDock() {
     let speed = prev ? prev.speed : null;
     if (!prev) {
       samples.current.set(rec.item.id, { bytes: got, at: now, speed: null });
-    } else if (now - prev.at >= 600 && got > prev.bytes) {
+    } else if (now - prev.at >= 600) {
       // Smoothed, because a raw delta between two samples jumps around far too
       // much to read as a number.
-      const inst = ((got - prev.bytes) * 1000) / (now - prev.at);
+      const inst = (Math.max(0, got - prev.bytes) * 1000) / (now - prev.at);
       speed = prev.speed ? prev.speed * 0.6 + inst * 0.4 : inst;
       samples.current.set(rec.item.id, { bytes: got, at: now, speed });
     }

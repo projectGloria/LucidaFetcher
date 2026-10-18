@@ -6,6 +6,7 @@ import QueueView from './views/QueueView.jsx';
 import SettingsView from './views/SettingsView.jsx';
 import AddView from './views/AddView.jsx';
 import DownloadDock from './components/DownloadDock.jsx';
+import RenderBoundary from './components/RenderBoundary.jsx';
 
 const NAV = [
   { id: 'queue', label: 'Downloads', icon: '⬇' },
@@ -70,16 +71,23 @@ export default function App() {
   if (bootError) return <BootFailure error={bootError} />;
   if (!ready || !config) return <Splash />;
 
+  const saveQueueView = (preferences) => {
+    setConfig(current => ({ ...current, queueView: preferences }));
+    if (isElectron) ipc.send('set-config', { queueView: preferences });
+  };
+
   return (
     <div className="app">
       <TrayBridge />
       <Sidebar view={view} setView={setView} />
       <main className="main">
-        {view === 'queue' && <QueueView onToast={toast} />}
+        <RenderBoundary key={view}>
+        {view === 'queue' && <QueueView onToast={toast} preferences={config.queueView} onPreferencesChange={saveQueueView} />}
         {view === 'add' && <AddView onToast={toast} />}
         {view === 'settings' && (
           <SettingsView config={config} setConfig={setConfig} onToast={toast} throttleOff={throttleOff} />
         )}
+        </RenderBoundary>
       </main>
       <DownloadDock />
       <div className="toast-host">
@@ -165,21 +173,19 @@ function TrayBridge() {
 function Sidebar({ view, setView }) {
   const stats = useStats();
   const paused = usePaused();
-  const prevDone = useRef({ completed: 0, skipped: 0 });
+  const prevDone = useRef(stats);
 
   // Sound cues are driven from the numbers rather than from engine events, so
   // one place decides when something is worth hearing about.
   useEffect(() => {
     const p = prevDone.current;
-    if (stats.completed > p.completed) play('complete');
-    if (stats.skipped > p.skipped) play('skipped');
-    const wasBusy = p.completed + p.skipped > 0;
+    const changed = stats.completed + stats.skipped > p.completed + p.skipped;
     const nowIdle = stats.queued === 0 && stats.active === 0;
-    if (wasBusy && nowIdle && stats.total > 0 &&
-        stats.completed + stats.skipped > p.completed + p.skipped) {
+    if (changed && nowIdle && stats.total > 0) {
       play('finished');
-    }
-    prevDone.current = { completed: stats.completed, skipped: stats.skipped };
+    } else if (stats.completed > p.completed) play('complete');
+    else if (stats.skipped > p.skipped) play('skipped');
+    prevDone.current = stats;
   }, [stats.completed, stats.skipped, stats.queued, stats.active, stats.total]);
 
   const counts = { queue: stats.queued + stats.active };

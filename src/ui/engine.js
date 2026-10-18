@@ -5,7 +5,7 @@
 // reason the engine never had to become React state. Nothing here owns download
 // logic; it only reads.
 
-import { useSyncExternalStore, useCallback } from 'react';
+import { useSyncExternalStore, useCallback, useMemo } from 'react';
 import { startEngine } from '../engine/renderer-integration.mjs';
 import { createSources } from '../engine/sources.mjs';
 import { makeMockController } from './mock.js';
@@ -18,15 +18,27 @@ export const isElectron = typeof window !== 'undefined' && typeof window.require
 export const ipc = isElectron ? window.require('electron').ipcRenderer : null;
 
 let controller = null;
+let initializing = null;
 let readyResolvers = [];
 
 export function getController() { return controller; }
 export function whenReady() {
+  if (initializing) return initializing;
   if (controller) return Promise.resolve(controller);
   return new Promise((r) => readyResolvers.push(r));
 }
 
-export async function initEngine({ config, log }) {
+export function initEngine(options) {
+  // StrictMode and interface recovery can mount App again during restoration.
+  // Every caller must wait for the same boot, including its saved-queue checks.
+  if (!initializing) initializing = initializeEngine(options).catch(error => {
+    initializing = null;
+    throw error;
+  });
+  return initializing;
+}
+
+async function initializeEngine({ config, log }) {
   if (controller) return controller;
 
   if (!isElectron) {
@@ -126,8 +138,9 @@ function useEngineVersion() {
 
 /** Every track the engine knows about, re-read whenever it changes. */
 export function useItems() {
-  useEngineVersion();
-  return controller ? controller.getItems() : [];
+  const store = controller;
+  const version = useEngineVersion();
+  return useMemo(() => store ? store.getItems() : [], [store, version]);
 }
 
 /**
@@ -147,8 +160,9 @@ export function useTransferProgress() {
 }
 
 export function useStats() {
-  useEngineVersion();
-  return controller ? controller.stats : { queued: 0, active: 0, completed: 0, skipped: 0, total: 0 };
+  const store = controller;
+  const version = useEngineVersion();
+  return useMemo(() => store ? store.stats : { queued: 0, active: 0, completed: 0, skipped: 0, total: 0 }, [store, version]);
 }
 
 export function usePaused() {

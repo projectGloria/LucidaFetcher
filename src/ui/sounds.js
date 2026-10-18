@@ -8,40 +8,89 @@
 
 let ctx = null;
 const settings = { enabled: false, volume: 0.35 };
+const active = new Set();
+const pending = new Map();
+let resuming = null;
+const MAX_NOTES = 12;
 
-function audio() {
-  if (!ctx) {
+async function audio() {
+  if (!ctx || ctx.state === 'closed') {
     const Ctx = window.AudioContext || window.webkitAudioContext;
     if (!Ctx) return null;
     ctx = new Ctx();
   }
-  // Autoplay policy parks the context until a gesture; every cue follows one.
-  if (ctx.state === 'suspended') ctx.resume().catch(() => {});
-  return ctx;
+  const current = ctx;
+  if (current.state === 'suspended') {
+    if (resuming?.context !== current) {
+      resuming = { context: current, promise: Promise.resolve(current.resume()) };
+    }
+    const work = resuming;
+    try { await work.promise; }
+    finally { if (resuming === work) resuming = null; }
+  }
+  return settings.enabled && current === ctx && current.state === 'running' ? current : null;
 }
 
-export function configureSounds(next) { Object.assign(settings, next); }
+export function configureSounds(next) {
+  if ('enabled' in next) settings.enabled = !!next.enabled;
+  if ('volume' in next) {
+    const value = Number(next.volume);
+    settings.volume = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0.35;
+  }
+  if (!settings.enabled) {
+    pending.clear();
+    resuming = null;
+    for (const stop of [...active]) stop();
+    const previous = ctx;
+    ctx = null;
+    // Closing a suspended or unavailable device can reject too.
+    try { Promise.resolve(previous?.close()).catch(() => {}); } catch { /* optional audio */ }
+  }
+}
 export function soundsEnabled() { return settings.enabled; }
 
-function tone(freqs, { duration = 0.13, type = 'sine', gain = 1 } = {}) {
-  const ac = audio();
-  if (!ac) return;
-  freqs.forEach((f, i) => {
-    const osc = ac.createOscillator();
-    const amp = ac.createGain();
-    osc.type = type;
-    osc.frequency.value = f;
-    const start = ac.currentTime + i * duration * 0.85;
-    const peak = settings.volume * gain;
-    // A short ramp instead of an abrupt start/stop: a hard gate on a sine wave
-    // clicks audibly.
-    amp.gain.setValueAtTime(0.0001, start);
-    amp.gain.exponentialRampToValueAtTime(Math.max(peak, 0.0002), start + 0.012);
-    amp.gain.exponentialRampToValueAtTime(0.0001, start + duration);
-    osc.connect(amp).connect(ac.destination);
-    osc.start(start);
-    osc.stop(start + duration + 0.02);
-  });
+async function tone(freqs, { duration = 0.13, type = 'sine', gain = 1 } = {}) {
+  // Reserve before waiting for the device: a suspended context can take an
+  // arbitrary time to resume, and result bursts must not queue unbounded cues.
+  const waiting = [...pending.values()].reduce((sum, notes) => sum + notes, 0);
+  if (!settings.enabled || !settings.volume || active.size + waiting + freqs.length > MAX_NOTES) return;
+  const ticket = {};
+  pending.set(ticket, freqs.length);
+  try {
+    const ac = await audio();
+    if (!ac || !settings.volume || !pending.has(ticket)) return;
+    freqs.forEach((f, i) => {
+      const osc = ac.createOscillator();
+      let amp;
+      const cleanup = () => {
+        active.delete(stop);
+        osc.onended = null;
+        try { osc.disconnect(); } catch { /* disconnected already */ }
+        try { amp?.disconnect(); } catch { /* disconnected already */ }
+      };
+      const stop = () => {
+        try { osc.stop(); } catch { /* never started or ended */ }
+        cleanup();
+      };
+      active.add(stop);
+      osc.onended = cleanup;
+      try {
+        amp = ac.createGain();
+        osc.type = type;
+        osc.frequency.value = f;
+        const start = ac.currentTime + i * duration * 0.85;
+        const peak = settings.volume * gain;
+        // A short ramp instead of an abrupt start/stop: a hard gate on a sine wave
+        // clicks audibly.
+        amp.gain.setValueAtTime(0.0001, start);
+        amp.gain.exponentialRampToValueAtTime(Math.max(peak, 0.0002), start + 0.012);
+        amp.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+        osc.connect(amp).connect(ac.destination);
+        osc.start(start);
+        osc.stop(start + duration + 0.02);
+      } catch (error) { stop(); throw error; }
+    });
+  } finally { pending.delete(ticket); }
 }
 
 export const cues = {
@@ -55,7 +104,9 @@ export const cues = {
 };
 
 export function play(name) {
-  if (!settings.enabled) return;
+  if (!settings.enabled || !settings.volume) return;
   const cue = cues[name];
-  if (cue) { try { cue(); } catch (e) { /* audio is never worth breaking the UI for */ } }
+  if (typeof cue === 'function') {
+    try { Promise.resolve(cue()).catch(() => {}); } catch { /* optional audio must never break the UI */ }
+  }
 }

@@ -75,7 +75,7 @@ test('profile persistence retains completed membership and resumable canonical t
   const c = new Controller(); c.pause();
   const stop = attachPersistence(c, { send: (...args) => sent.push(args) });
   c.addProfile(profile, playlists.map(pl => ({ ...pl, trackKeys: ['shared', 'done'] })), {
-    shared: track, done: { title: 'Complete', artist: 'Artist', status: 'downloaded', file: 'Tracks/done.flac', bytes: 100 },
+    shared: track, done: { title: 'Complete', artist: 'Artist', status: 'downloaded', file: 'done.flac', bytes: 100 },
   });
   await new Promise(resolve => setTimeout(resolve, 5));
   const snap = sent.find(([name]) => name === 'queue-save')[1];
@@ -93,7 +93,8 @@ test('profile persistence retains completed membership and resumable canonical t
   const result = await resumed.restore();
   assert.ok(channels.indexOf('transfers-resumable') < channels.indexOf('downloads-check'));
   assert.equal(result.resumed, 1); assert.equal(resumed.tracks.size, 2); assert.equal(resumed.items.size, 0);
-  assert.equal(resumed.getItem('shared').item.folderName, 'Profile/Tracks');
+  const firstPlFolder = resumed.playlists.get('a').folder;
+  assert.equal(resumed.getItem('shared').item.folderName, `Profile/${firstPlFolder}`);
   assert.equal(resumed.getPlaylistItems('b').length, 2);
   assert.equal(resumed.getItem('shared').status, 'downloading', 'resume wins over any completion guess');
   finish({ status: 'completed', file: 'actual (1).flac', savePath: '/fixture/actual (1).flac', bytes: 100 });
@@ -107,7 +108,7 @@ test('legacy profile display rows migrate without dropping shared membership', (
   const rows = playlists.map(pl => ({ id: 'shared', key: 'shared', ...track, profileId: 'p', profileFolder: 'Profile', folderName: 'Profile/Playlists', groupId: pl.id, groupName: pl.name }));
   const snap = normalizeQueueSnapshot({ v: 3, items: rows });
   assert.equal(snap.tracks.length, 1); assert.equal(snap.playlists.length, 2);
-  assert.equal(snap.tracks[0].folderName, 'Profile/Tracks');
+  assert.equal(snap.tracks[0].folderName, `Profile/${snap.playlists[0].folder}`);
   assert.ok(snap.playlists.every(pl => pl.trackKeys[0] === 'shared'));
 });
 
@@ -119,39 +120,48 @@ test('every profile library receives shared canonical track metadata', () => {
   c.addProfile({ id: 'second', folderName: 'Second' }, [{ ...playlists[1], id: 'second-b' }], { shared: track });
   c.dispose();
   const payload = messages.find(([name, value]) => name === 'profile-library-sync' && value.folderName === 'Second')[1];
-  assert.equal(payload.state.tracks.shared.file, 'Tracks/actual.flac');
+  assert.equal(payload.state.tracks.shared.file, 'Mix/actual.flac');
   assert.equal(payload.state.tracks.shared.sourceFolder, 'Profile');
 });
 
-test('library output validates disk files, preserves collisions, copies shared audio and separates equal playlist names', async () => {
+test('library output validates disk files, preserves collisions, copies shared audio into each playlist folder and separates equal playlist names', async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'lucida-output-test-'));
   try {
     const owner = path.join(temp, 'Owner'), dest = path.join(temp, 'Second');
-    fs.mkdirSync(path.join(owner, 'Tracks'), { recursive: true }); fs.mkdirSync(path.join(dest, 'Tracks'), { recursive: true });
-    const source = path.join(owner, 'Tracks', 'actual (1).flac'); fs.writeFileSync(source, 'completed-fixture');
-    fs.writeFileSync(path.join(dest, 'Tracks', 'actual (1).flac'), 'other-music');
+    fs.mkdirSync(path.join(owner, 'Mix'), { recursive: true });
+    const source = path.join(owner, 'Mix', 'actual (1).flac'); fs.writeFileSync(source, 'completed-fixture');
     const bytes = fs.statSync(source).size;
     const validateFile = file => { try { return fs.readFileSync(file, 'utf8') === 'completed-fixture'; } catch { return false; } };
     const snapshot = { profile, tracks: { shared: { ...track, file: 'wrong.flac', savePath: source, bytes, status: 'downloaded' } }, playlists: playlists.map(pl => ({ ...pl, file: 'Playlists/Mix.m3u8' })) };
+    // Pre-populate a colliding file in the first playlist folder so collision disambiguation is tested
+    const previewState = await syncProfileLibrary(path.join(temp, 'Preview'), { profile, tracks: {}, playlists: snapshot.playlists }, { validateFile });
+    const firstPlFolder = previewState.playlists[0].folder;
+    const secondPlFolder = previewState.playlists[1].folder;
+    fs.mkdirSync(path.join(dest, firstPlFolder), { recursive: true });
+    fs.writeFileSync(path.join(dest, firstPlFolder, 'actual (1).flac'), 'other-music');
     const state = await syncProfileLibrary(dest, snapshot, { validateFile });
-    assert.notEqual(state.playlists[0].file.toLowerCase(), state.playlists[1].file.toLowerCase());
+    assert.notEqual(state.playlists[0].folder.toLowerCase(), state.playlists[1].folder.toLowerCase());
     assert.match(state.tracks.shared.file, /actual \(1\) \[/);
-    const copied = path.join(dest, state.tracks.shared.file);
-    assert.equal(fs.readFileSync(copied, 'utf8'), 'completed-fixture');
-    assert.equal(fs.readFileSync(path.join(dest, 'Tracks', 'actual (1).flac'), 'utf8'), 'other-music');
-    for (const pl of state.playlists) assert.ok(fs.readFileSync(path.join(dest, pl.file), 'utf8').includes('../' + state.tracks.shared.file));
+    const copiedFirst = path.join(dest, state.tracks.shared.file);
+    const copiedSecond = path.join(dest, state.tracks.shared.playlistFiles[secondPlFolder]);
+    assert.equal(fs.readFileSync(copiedFirst, 'utf8'), 'completed-fixture');
+    assert.equal(fs.readFileSync(copiedSecond, 'utf8'), 'completed-fixture');
+    assert.equal(fs.readFileSync(path.join(dest, firstPlFolder, 'actual (1).flac'), 'utf8'), 'other-music');
+    assert.equal(fs.existsSync(path.join(dest, 'Tracks')), false);
+    assert.equal(fs.existsSync(path.join(dest, 'Playlists')), false);
+    assert.equal(fs.existsSync(path.join(dest, 'library.json')), false);
     const again = await syncProfileLibrary(dest, snapshot, { validateFile });
     assert.equal(again.tracks.shared.file, state.tracks.shared.file, 'sync does not make new copies');
-    fs.unlinkSync(copied);
+    fs.unlinkSync(copiedFirst);
     const loaded = await loadValidatedLibrary(dest, validateFile);
     assert.equal(loaded.tracks.shared.status, 'missing');
-    await saveLibrary(dest, { tracks: { escape: { status: 'downloaded', bytes, file: '../Owner/Tracks/actual (1).flac' } } });
+    await saveLibrary(dest, { tracks: { escape: { status: 'downloaded', bytes, file: '../Owner/Mix/actual (1).flac' } } });
     assert.equal((await loadValidatedLibrary(dest, validateFile)).tracks.escape.status, 'missing');
     const reservedDir = path.join(temp, 'Reserved');
     let released = false;
     const copiedState = await syncProfileLibrary(reservedDir, snapshot, { validateFile, reserveCopy: target =>
       path.basename(target) === path.basename(source) ? null : () => { released = true; } });
-    assert.notEqual(copiedState.tracks.shared.file, 'Tracks/' + path.basename(source));
+    assert.notEqual(copiedState.tracks.shared.file, `${firstPlFolder}/${path.basename(source)}`);
     assert.ok(released, 'copy releases its reservation');
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
@@ -177,6 +187,10 @@ test('complete-file checks reject format-only partial files and recorded length 
     sandbox.transfers.one = { savePath: file };
     sandbox.manifest.saved = { savePath: file, bytes: 50, service: 'qobuz' };
     assert.equal(sandbox.checkDownloaded({ key: 'saved', savePath: file, bytes: 50 }).done, false, 'a pending transfer cannot be declared complete');
+    delete sandbox.transfers.one;
+    assert.equal(sandbox.checkDownloaded({ key: 'saved', savePath: file, bytes: 50 }).service, 'qobuz', 'recorded files retain the verified manifest provider');
+    sandbox.manifest.saved.savePath = path.join(temp, 'different.flac');
+    assert.equal(sandbox.checkDownloaded({ key: 'saved', savePath: file, bytes: 50 }).service, null, 'a different file cannot establish this download provider');
     // Matching filenames from an import scan must include the exact artist.
     assert.equal(sandbox.checkDownloaded({ title: 'Song', artist: 'Other' }, [{ file: path.basename(file), tokens: ['artist', 'song'] }], true).done, false);
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }

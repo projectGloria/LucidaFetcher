@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { build } from 'vite';
+import react from '@vitejs/plugin-react';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const sandbox = await fs.mkdtemp(path.join(os.tmpdir(), 'lucidafetcher-smoke-'));
@@ -31,6 +33,12 @@ function run(executable, args) {
 }
 
 try {
+  const fixtureDir = path.join(sandbox, 'ui-fixture');
+  await build({ configFile: false, logLevel: 'error', plugins: [react()], build: {
+    outDir: fixtureDir,
+    rolldownOptions: { input: path.join(root, 'test/ui-fixture.jsx'), output: { entryFileNames: 'fixture.js' } },
+  } });
+  await fs.writeFile(path.join(fixtureDir, 'index.html'), '<div id="root"></div><script type="module" src="./fixture.js"></script>');
   if (packaged) await fs.copyFile(packageArchive, path.join(sandbox, 'app.asar'));
   else for (const name of ['main.js', 'dist', 'build', 'src/engine']) await fs.cp(path.join(root, name), path.join(sandbox, name), { recursive: true });
   await fs.mkdir(path.join(stateRoot, 'state'), { recursive: true });
@@ -53,7 +61,140 @@ try {
   const unknownCount = await fs.readFile(path.join(sandbox, 'large.flac'));
   unknownCount.writeBigUInt64BE(unknownCount.readBigUInt64BE(18) & ~0xfffffffffn, 18);
   await fs.writeFile(path.join(sandbox, 'large.flac'), unknownCount);
+  const fixtureBytes = (await fs.stat(path.join(sandbox, 'fixture.flac'))).size;
+  const savedLists = ['a', 'b'].map((id, i) => ({ id: 'fixture-list-' + id, profileId: 'fixture-profile',
+    name: 'Saved Mix ' + id.toUpperCase(), service: 'spotify', trackKeys: [i ? 'fixture-missing' : 'fixture-done'] }));
+  await fs.writeFile(path.join(stateRoot, 'state', 'queue.json'), JSON.stringify({
+    v: 4, paused: true, items: [], profiles: [{ id: 'fixture-profile', name: 'Saved Fixture', user: 'fixture',
+      service: 'spotify', folderName: 'Saved Fixture' }], playlists: savedLists,
+    tracks: [
+      { id: 'fixture-done', key: 'fixture-done', title: 'Stored Song', artist: 'Fixture', service: 'spotify',
+        transferService: 'qobuz', status: 'completed', savePath: path.join(sandbox, 'fixture.flac'), bytes: fixtureBytes },
+      { id: 'fixture-missing', key: 'fixture-missing', title: 'Missing Song', artist: 'Fixture', service: 'spotify', status: 'skipped' },
+    ],
+  }));
+  await fs.writeFile(path.join(stateRoot, 'state', 'history.json'), JSON.stringify([
+    { id: 'h-fixture', kind: 'profile', label: 'fixture', user: 'fixture', name: 'Saved Fixture', count: 2,
+      at: Date.now(), info: { service: 'spotify', user: 'fixture', name: 'Saved Fixture' }, results: savedLists },
+  ]));
   const engineUrl = new URL('../src/engine/renderer-integration.mjs', import.meta.url).href;
+  const checkNavigation = async (restored = false) => {
+    const ipc = window.require('electron').ipcRenderer;
+    const delay = () => new Promise(resolve => setTimeout(resolve, 75));
+    const nav = async label => {
+      [...document.querySelectorAll('.nav-item')].find(el => el.textContent.includes(label)).click();
+      await delay();
+    };
+    const group = id => [...document.querySelectorAll('.group-head')].find(el => el.getAttribute('aria-controls') === 'group-body-' + id);
+    await nav('Downloads');
+    if (!restored) {
+      const icon = document.querySelector('.row.done .trail .src-icon');
+      if (icon?.getAttribute('alt') !== 'Qobuz') throw new Error('Restored download shows the metadata service instead of Qobuz');
+      group('fixture-list-a').click(); await delay();
+      await nav('Settings'); await nav('Downloads');
+      if (group('fixture-list-a')?.getAttribute('aria-expanded') !== 'false') throw new Error('Playlist collapse was lost on navigation');
+      [...document.querySelectorAll('.topbar button')].find(el => el.textContent === 'Missing').click(); await delay();
+      [...document.querySelectorAll('.topbar button')].find(el => el.textContent === 'Collapse all').click(); await delay();
+      await nav('Add music'); await nav('Downloads');
+    }
+    if (document.querySelector('.profile-head')?.getAttribute('aria-expanded') !== 'false' ||
+        ![...document.querySelectorAll('.topbar button')].some(el => el.textContent === 'Missing' && el.getAttribute('aria-pressed') === 'true')) {
+      throw new Error('Download view choices were not retained' + (restored ? ' after reload' : ' after navigation'));
+    }
+    const prefs = (await ipc.invoke('get-config')).queueView;
+    if (prefs.filter !== 'missing' || !['fixture-profile', 'fixture-list-a', 'fixture-list-b'].every(id => prefs.collapsed.includes(id))) {
+      throw new Error('Filtered collapse discarded hidden playlist preferences: ' + JSON.stringify(prefs));
+    }
+    await nav('Add music');
+    [...document.querySelectorAll('.mode-tab')].find(el => el.textContent.includes('Spotify profile')).click(); await delay();
+    const recent = document.querySelector('.recent-profile');
+    if (!recent?.textContent.includes('Saved Fixture') || !document.querySelector('#profile-search').closest('form').contains(recent)) {
+      throw new Error('Saved profile is not directly below the search box');
+    }
+    // Reopening saved results must not submit the enclosing profile search form.
+    const invoke = ipc.invoke;
+    let requests = 0;
+    ipc.invoke = function (channel, ...args) {
+      if (channel.startsWith('http-')) requests++;
+      return invoke.call(this, channel, ...args);
+    };
+    try {
+      recent.click(); await delay();
+      if (requests || document.querySelectorAll('.playlist-grid .playlist-card').length !== 2 ||
+          document.querySelector('#profile-search').value !== 'fixture' || !document.querySelector('.profile-identity').textContent.includes('Saved Fixture')) {
+        throw new Error('Saved profile did not reopen cached playlists without searching');
+      }
+    } finally { ipc.invoke = invoke; }
+    return prefs;
+  };
+  const checkSounds = async () => {
+    const ipc = window.require('electron').ipcRenderer;
+    const delay = () => new Promise(resolve => setTimeout(resolve, 25));
+    const toggle = () => [...document.querySelectorAll('label.switch')].find(label => label.textContent.includes('Play a sound')).querySelector('input');
+    const alive = () => {
+      if (!document.querySelector('.app .sidebar') || !document.querySelector('.main h1')) throw new Error('Sound controls blanked the interface');
+    };
+    toggle().click(); await delay(); alive();
+    if (!toggle().checked) throw new Error('Sound switch does not reflect its enabled state');
+    if (!document.querySelector('#vol')) throw new Error('Sound volume is missing');
+    let writes = 0;
+    const send = ipc.send;
+    ipc.send = function (channel, patch, ...args) {
+      if (channel === 'set-config' && 'soundVolume' in patch) writes++;
+      return send.call(this, channel, patch, ...args);
+    };
+    try {
+      const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      for (const value of ['0.4', '0.5', '0.6', '0.7']) {
+        const slider = document.querySelector('#vol');
+        set.call(slider, value); slider.dispatchEvent(new Event('input', { bubbles: true }));
+        await delay(); alive();
+      }
+      if (writes) throw new Error('Volume drag wrote settings before release');
+      document.querySelector('#vol').dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+      await delay();
+      if (writes !== 1) throw new Error('Volume release must save once, saved ' + writes);
+    } finally { ipc.send = send; }
+    const saved = await ipc.invoke('get-config');
+    if (saved.sounds !== true || saved.soundVolume !== 0.7) throw new Error('Sound preferences were not saved');
+    // A failed audio driver must also leave the actual built interface usable.
+    toggle().click(); await delay();
+    const original = window.AudioContext;
+    try {
+      window.AudioContext = class { constructor() { throw new Error('fixture: unavailable audio device'); } };
+      toggle().click(); await delay(); alive();
+      toggle().click(); await delay();
+      window.AudioContext = class {
+        state = 'suspended';
+        resume() { return Promise.reject(new Error('fixture: device disconnected')); }
+        close() { return Promise.resolve(); }
+      };
+      toggle().click(); await delay(); alive();
+      toggle().click(); await delay();
+    } finally { window.AudioContext = original; }
+    toggle().click(); await delay(); alive();
+    document.querySelector('.main .pane').scrollTop = 100000;
+    return (await ipc.invoke('get-config')).sounds;
+  };
+  const checkLinkPreview = async () => {
+    const delay = () => new Promise(resolve => setTimeout(resolve, 50));
+    [...document.querySelectorAll('.nav-item')].find(button => button.textContent.includes('Add music')).click();
+    await delay();
+    [...document.querySelectorAll('.mode-tab')].find(button => button.textContent.includes('Paste a link')).click();
+    await delay();
+    const input = document.querySelector('#music-link');
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'Artist - Song');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await delay();
+    input.closest('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await delay();
+    if (document.querySelector('[role="alert"]') || !document.querySelector('#music-link') || !document.querySelector('.sidebar')) {
+      throw new Error('Plain text in link preview broke the interface');
+    }
+    if (![...document.querySelectorAll('.toast.err')].some(toast => toast.textContent.includes('Paste a Spotify or Deezer'))) {
+      throw new Error('Invalid link preview did not explain which links are supported');
+    }
+  };
   const renderer = `
     (async () => {
       const { startEngine } = await import(${JSON.stringify(engineUrl)});
@@ -88,21 +229,22 @@ try {
       const lists = [0, 1].map(i => ({ id: 'owner-' + i, name: 'Mix', file: 'Playlists/Mix.m3u8', artwork: 'https://art.fixture/' + i, trackKeys: ['shared-' + i] }));
       c.addProfile({ id: 'owner', folderName: 'Owner' }, lists, tracks);
       c.addProfile({ id: 'second', folderName: 'Second' }, [{ id: 'second-list', name: 'Mix', artwork: 'https://art.fixture/second', trackKeys: ['shared-0', 'shared-1'] }], tracks);
-      // Library sync is asynchronous; wait for validated files, then main checks
-      // the actual M3U references and shared copies below.
+      // Library sync is asynchronous; wait for validated files and covers,
+      // then main checks the playlist folders and shared copies below.
       const until = Date.now() + 10000;
+      let libraries;
       while (true) {
         const a = await ipc.invoke('profile-library-load', 'Owner');
         const b = await ipc.invoke('profile-library-load', 'Second');
         if (Object.values(a.tracks).length === 2 && Object.values(b.tracks).length === 2 &&
             [...Object.values(a.tracks), ...Object.values(b.tracks)].every(t => t.status === 'downloaded' && t.savePath) &&
             [...a.playlists.map(pl => ['Owner', pl]), ...b.playlists.map(pl => ['Second', pl])].every(([folder, pl]) =>
-              window.require('fs').existsSync(window.require('path').join(${JSON.stringify(path.join(sandbox, 'downloads'))}, folder, pl.file.replace(/\\.m3u8$/i, '.jpg'))))) break;
+              window.require('fs').existsSync(window.require('path').join(${JSON.stringify(path.join(sandbox, 'downloads'))}, folder, pl.folder, 'cover.png')))) { libraries = [a, b]; break; }
         if (Date.now() > until) throw new Error('Profile libraries never became valid: ' + JSON.stringify({ a, b }));
         await new Promise(resolve => setTimeout(resolve, 100));
       }
       c.dispose();
-      return result;
+      return { downloads: result, libraries };
     })()
   `;
   const bootstrap = `
@@ -185,7 +327,42 @@ try {
             '(async () => { [...document.querySelectorAll(".nav-item")].find(button => button.textContent.includes("Settings")).click(); await new Promise(resolve => setTimeout(resolve, 50)); const label = [...document.querySelectorAll("label.switch")].find(label => label.textContent.includes("Keep trying")); if (!label) throw new Error("Keep trying option missing"); label.querySelector("input").click(); const config = await window.require("electron").ipcRenderer.invoke("get-config"); return config.keepTrying; })()'
           );
           if (!keepTryingSaved) throw new Error('Keep trying setting was not saved');
-          const results = await win.webContents.executeJavaScript(${JSON.stringify(renderer)});
+          // Exercise label focus through trusted mouse input. input.click()
+          // toggles the value without focusing the absolutely positioned input
+          // and missed a document scroll that moved the entire UI off screen.
+          for (let n = 0; n < 4; n++) {
+            const point = await win.webContents.executeJavaScript(
+              '(() => { const pane = document.querySelector(".main .pane"); pane.scrollTop = pane.scrollHeight; const label = [...document.querySelectorAll("label.switch")].find(el => el.textContent.includes("Play a sound")); const r = label.querySelector(".track").getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()'
+            );
+            win.webContents.sendInputEvent({ type: 'mouseMove', ...point });
+            win.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point });
+            win.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point });
+            await new Promise(resolve => setTimeout(resolve, 75));
+            const shell = await win.webContents.executeJavaScript(
+              '({ scrollY, top: document.querySelector(".app").getBoundingClientRect().top, focused: document.activeElement?.type, checked: document.activeElement?.checked, sidebarBottom: document.querySelector(".sidebar").getBoundingClientRect().bottom })'
+            );
+            if (shell.focused !== 'checkbox' || shell.checked !== (n % 2 === 0)) throw new Error('Trusted sound click did not focus and toggle the checkbox: ' + JSON.stringify(shell));
+            if (shell.scrollY !== 0 || shell.top !== 0 || shell.sidebarBottom <= 0) throw new Error('Sound label focus moved the app out of the window: ' + JSON.stringify(shell));
+          }
+          const soundsSaved = await win.webContents.executeJavaScript(${JSON.stringify('(' + checkSounds.toString() + ')()')});
+          if (!soundsSaved) throw new Error('Sound setting was not saved');
+          // A hidden window may return its previous compositor frame on the
+          // first capture; request a frame, then capture the settled controls.
+          await win.webContents.capturePage();
+          await new Promise(resolve => setTimeout(resolve, 150));
+          await win.webContents.capturePage().then(image => fs.writeFileSync(path.join(__dirname, 'settings.png'), image.toPNG()));
+          await win.webContents.executeJavaScript(${JSON.stringify('(' + checkLinkPreview.toString() + ')()')});
+          await win.webContents.executeJavaScript(${JSON.stringify('(' + checkNavigation.toString() + ')(false)')});
+          const reloaded = new Promise(resolve => win.webContents.once('did-finish-load', resolve));
+          win.reload(); await reloaded;
+          await win.webContents.executeJavaScript(
+            'new Promise((resolve, reject) => { const until = Date.now() + 10000; const tick = () => { if (document.querySelector(".app")) resolve(); else if (Date.now() > until) reject(new Error("UI did not restart")); else setTimeout(tick, 50); }; tick(); })'
+          );
+          await win.webContents.executeJavaScript(${JSON.stringify('(' + checkNavigation.toString() + ')(true)')});
+          await win.webContents.capturePage();
+          await new Promise(resolve => setTimeout(resolve, 150));
+          await win.webContents.capturePage().then(image => fs.writeFileSync(path.join(__dirname, 'recent-profiles.png'), image.toPNG()));
+          const { downloads: results, libraries } = await win.webContents.executeJavaScript(${JSON.stringify(renderer)});
           if (new Set(results.map(result => result.savePath)).size !== 3) throw new Error('Concurrent files collided');
           for (const result of results.slice(0, 2)) {
             if (!fs.readFileSync(result.savePath).equals(fixture)) throw new Error('Downloaded bytes changed');
@@ -202,24 +379,37 @@ try {
             at += 4 + len;
           }
           if (!picture) throw new Error('Artwork repair removed the cover');
-          for (const name of ['Owner', 'Second']) {
+          for (const [i, name] of ['Owner', 'Second'].entries()) {
             const dir = path.join(__dirname, 'downloads', name);
-            const library = JSON.parse(fs.readFileSync(path.join(dir, 'library.json'), 'utf8'));
+            const library = libraries[i];
             if (new Set(library.playlists.map(pl => pl.file.toLowerCase())).size !== library.playlists.length) throw new Error('Playlist filename collision');
             for (const track of Object.values(library.tracks)) {
-              if (!fs.readFileSync(path.join(dir, track.file)).equals(fixture)) throw new Error('Shared track copy changed');
+              for (const file of new Set([track.file, ...Object.values(track.playlistFiles || {})])) {
+                if (!fs.readFileSync(path.join(dir, file)).equals(fixture)) throw new Error('Shared track copy changed');
+              }
             }
             for (const pl of library.playlists) {
-              const art = fs.readFileSync(path.join(dir, pl.file.replace(/\\.m3u8$/i, '.jpg')));
-              if (art[0] !== 255 || art[1] !== 216 || nativeImage.createFromBuffer(art).isEmpty()) throw new Error('Playlist cover is not a valid JPEG');
-              const text = fs.readFileSync(path.join(dir, pl.file), 'utf8');
-              for (const key of pl.trackKeys) if (!text.includes('../' + library.tracks[key].file)) throw new Error('Broken M3U path');
+              const art = fs.readFileSync(path.join(dir, pl.folder, 'cover.png'));
+              if (art[0] !== 137 || art[1] !== 80 || nativeImage.createFromBuffer(art).isEmpty()) throw new Error('Playlist cover is not a valid PNG');
+              for (const key of pl.trackKeys) {
+                const file = library.tracks[key].playlistFiles[pl.folder];
+                if (!file || !fs.existsSync(path.join(dir, file))) throw new Error('Missing playlist audio copy');
+              }
             }
           }
           if ((visits.get('Retry') || 0) < 2) throw new Error('Failed track was not automatically retried');
           if ((visits.get('Other') || 0) < 2 || fs.existsSync(path.join(__dirname, 'downloads', 'wrong.flac'))) throw new Error('Wrong recording was accepted or retained');
           if (!sawPaused || !sawResumed) throw new Error('Pause/resume did not reach live Chromium transfers');
-          console.log('PASS: ${packaged ? 'packaged archive' : 'source'}, built UI, saved Keep trying option, real cascades, automatic retry, wrong remix rejected, three FLAC downloads, actual filenames, byte integrity, oversized artwork retained, audio frames unchanged, shared profile copies, distinct playlists and JPEG covers, valid M3U paths, live pause/resume, disposal and clean quit');
+          const fixtureWindow = new BrowserWindow({ show: false, webPreferences: { backgroundThrottling: false } });
+          await fixtureWindow.loadFile(path.join(__dirname, 'ui-fixture', 'index.html'));
+          const uiRegression = await fixtureWindow.webContents.executeJavaScript(
+            'new Promise((resolve, reject) => { const until = Date.now() + 10000; const tick = () => { if (window.runUIRegression) { try { resolve(window.runUIRegression()); } catch (error) { reject(error); } } else if (Date.now() > until) reject(new Error("UI fixture did not load")); else setTimeout(tick, 25); }; tick(); })'
+          );
+          if (!uiRegression.recovered || uiRegression.extraExpansions) throw new Error('UI regressions failed');
+          fixtureWindow.destroy();
+          console.log('PASS: React render recovery preserves queue; 80 progress ticks across 10001 rows caused no full-list rebuilds');
+          console.log('PASS: download expansion and filter survive navigation and reload; filtered collapse preserves hidden choices; recent profiles reopen cached playlists without a search; restored source is Qobuz rather than Spotify metadata');
+          console.log('PASS: ${packaged ? 'packaged archive' : 'source'}, built UI, trusted sound-label clicks keep the shell onscreen, sound toggle, bounded volume writes, audio device failures, invalid link preview, saved preferences, real cascades, automatic retry, wrong remix rejected, three FLAC downloads, actual filenames, byte integrity, oversized artwork retained, audio frames unchanged, shared profile copies, distinct playlist folders and PNG covers, live pause/resume, disposal and clean quit');
           clearTimeout(deadline); server.close(); app.quit();
         } catch (error) { console.error(error.stack); clearTimeout(deadline); server.close(); app.exit(1); }
       });
@@ -233,11 +423,14 @@ try {
   if (Object.keys(manifest).length !== 3) throw new Error('Quit did not flush all completed downloads to the manifest');
   const config = JSON.parse(await fs.readFile(path.join(stateRoot, 'state', 'config.json'), 'utf8'));
   if (config.keepTrying !== true) throw new Error('Keep trying preference did not survive quit');
+  if (config.sounds !== true || config.soundVolume !== 0.7) throw new Error('Sound preferences did not survive quit');
+  if (config.queueView?.filter !== 'missing' || config.queueView?.collapsed?.length !== 3) throw new Error('Download view preferences did not survive quit');
   console.log(output.split(/\r?\n/).filter(line => line.startsWith('PASS:')).join('\n'));
   // This directory is created above solely for this check; never remove a
   // computed path unless it is still inside that temporary workspace.
   if (path.dirname(path.resolve(sandbox)) !== path.resolve(os.tmpdir()) || !path.basename(sandbox).startsWith('lucidafetcher-smoke-')) throw new Error('Unexpected smoke workspace');
-  await fs.rm(sandbox, { recursive: true, force: true });
+  if (process.argv.includes('--keep-artifacts')) console.log('Smoke artifacts retained at ' + sandbox);
+  else await fs.rm(sandbox, { recursive: true, force: true });
 } catch (error) {
   console.error(error.message);
   console.error('Smoke artifacts retained at ' + sandbox);

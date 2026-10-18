@@ -80,6 +80,7 @@ export function makeMockController() {
       emit(); return n;
     },
     removeGroup(id) { return ctrl.remove([...items.values()].filter(r => (r.item.groupId || '__loose__') === id).map(r => r.item.id)); },
+    removeProfile(id) { return ctrl.remove([...items.values()].filter(r => r.item.profileId === id).map(r => r.item.id)); },
     retrySkipped() {
       let n = 0;
       for (const r of items.values()) if (r.status === 'skipped') { r.status = 'queued'; r.statusText = 'Queued for one more try'; r.tried = []; n++; }

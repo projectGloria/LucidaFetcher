@@ -155,11 +155,13 @@ export function startEngine(opts) {
       const profPlaylists = [];
       for (const pl of controller.playlists.values()) {
         if (pl.profileId === prof.id) {
+          const folder = pl.folder || pl.file || String(pl.name || 'Playlist').replace(/[<>:"/\\|?*\x00-\x1f]+/g, '_').trim();
           profPlaylists.push({
             id: pl.id,
             name: pl.name,
             artwork: pl.artwork || null,
-            file: pl.file || `Playlists/${String(pl.name || 'Playlist').replace(/[<>:"/\\|?*\x00-\x1f]+/g, '_').trim()}.m3u8`,
+            folder,
+            file: folder,
             trackKeys: pl.trackKeys || [],
           });
         }
@@ -169,6 +171,11 @@ export function startEngine(opts) {
       const members = new Set(profPlaylists.flatMap(pl => pl.trackKeys));
       for (const [key, track] of controller.tracks.entries()) {
         if (members.has(key)) {
+          const ownerPl = controller.playlists.get(track.firstPlaylistId)
+            || profPlaylists.find(pl => (pl.trackKeys || []).includes(key))
+            || profPlaylists[0];
+          const ownerFolder = ownerPl?.folder || ownerPl?.file || 'Playlist';
+          const baseFile = track.file ? String(track.file).replace(/\\/g, '/').replace(/^Tracks\/+/i, '').split('/').pop() : null;
           profTracks[key] = {
             title: track.item.title,
             artist: track.item.artist,
@@ -176,9 +183,10 @@ export function startEngine(opts) {
             image: track.item.image || null,
             artworkPending: !!track.item.artworkPending,
             service: track.item.service || null,
+            downloadService: track.transferService || track.result?.service || null,
             trackId: track.item.trackId || null,
             isrc: track.item.isrc || null,
-            file: track.file ? (track.file.startsWith('Tracks/') ? track.file : `Tracks/${track.file}`) : null,
+            file: baseFile ? `${ownerFolder}/${baseFile}` : null,
             savePath: track.savePath || track.result?.savePath || null,
             sourceFolder: track.item.profileFolder || controller.profiles.get(track.item.profileId)?.folderName || null,
             bytes: track.bytes || null,
@@ -338,13 +346,15 @@ export function attachPersistence(controller, ipcRenderer, log = () => {}) {
     else ipcRenderer.send('queue-clear');
   };
   let removalDepth = 0;
-  for (const method of ['remove', 'removeGroup']) {
+  for (const method of ['remove', 'removeGroup', 'removeProfile']) {
+    if (typeof controller[method] !== 'function') continue;
     const baseRemove = controller[method].bind(controller);
     controller[method] = ids => {
       removalDepth++;
       try {
+        const before = controller.getSnapshot();
         const count = baseRemove(ids);
-        if (count && removalDepth === 1) saveRemoval();
+        if ((count || controller.getSnapshot() !== before) && removalDepth === 1) saveRemoval();
         return count;
       } finally { removalDepth--; }
     };
@@ -380,7 +390,11 @@ export function attachPersistence(controller, ipcRenderer, log = () => {}) {
           toResume.push(item.id);
           return { ...item, status: 'queued' };
         }
-        if (checks[i]?.done) { alreadyDone++; return { ...item, ...checks[i], status: 'completed' }; }
+        if (checks[i]?.done) {
+          alreadyDone++;
+          return { ...item, ...checks[i], service: item.service,
+            transferService: checks[i].service || item.transferService || null, status: 'completed' };
+        }
         if (item.skippedInEarlierRun || item.status === 'skipped') { staySkipped++; return { ...item, status: 'skipped' }; }
         if (item.status === 'cancelled') return item;
         restored++;
@@ -435,15 +449,46 @@ export function normalizeQueueSnapshot(snapshot) {
     // Upgrade generated queries from old queues while keeping custom searches.
     return item.searchVariants?.[0] === variants[0] ? { ...item, searchVariants: variants } : item;
   };
-  if (snap.v >= 4) return { ...snap, items: (snap.items || []).map(refreshQueries), tracks: (snap.tracks || []).map(refreshQueries), profiles: snap.profiles || [], playlists: assignPlaylistFiles(snap.playlists || []) };
+  if (snap.v >= 4) {
+    const assignedPlaylists = assignPlaylistFiles(snap.playlists || []).map(pl => {
+      const prof = (snap.profiles || []).find(p => p.id === pl.profileId);
+      const profFolder = prof?.folderName || '';
+      const folder = pl.folder || pl.file;
+      const folderName = (!pl.folderName || /\/Playlists$/i.test(pl.folderName) || pl.folderName === 'Playlists')
+        ? (profFolder ? `${profFolder}/${folder}` : folder)
+        : pl.folderName;
+      return { ...pl, folderName };
+    });
+    const plById = new Map(assignedPlaylists.map(pl => [pl.id, pl]));
+    const tracks = (snap.tracks || []).map(t => {
+      const refreshed = refreshQueries(t);
+      if (!refreshed.folderName || /\/Tracks$/i.test(refreshed.folderName) || refreshed.folderName === 'Tracks') {
+        const ownerPl = plById.get(refreshed.firstPlaylistId)
+          || assignedPlaylists.find(pl => (pl.trackKeys || []).includes(refreshed.key || refreshed.id));
+        if (ownerPl?.folderName) return { ...refreshed, folderName: ownerPl.folderName };
+      }
+      return refreshed;
+    });
+    return { ...snap, items: (snap.items || []).map(refreshQueries), tracks, profiles: snap.profiles || [], playlists: assignedPlaylists };
+  }
   const profiles = new Map(), playlists = new Map(), tracks = new Map(), items = [];
   for (const item of snap.items || []) {
     if (!item.profileId || !item.groupId || item.id !== item.key) { items.push(item); continue; }
-    const folderName = item.profileFolder || String(item.folderName || '').replace(/\/Playlists$/, '');
+    const folderName = item.profileFolder || String(item.folderName || '').replace(/\/(Playlists|Tracks)$/i, '');
     profiles.set(item.profileId, { id: item.profileId, name: item.profileName, user: item.profileUser, service: item.profileService, image: item.profileArtwork, folderName });
-    if (!playlists.has(item.groupId)) playlists.set(item.groupId, { id: item.groupId, profileId: item.profileId, name: item.groupName, artwork: item.groupArtwork, folderName: `${folderName}/Playlists`, trackKeys: [] });
+    if (!playlists.has(item.groupId)) playlists.set(item.groupId, { id: item.groupId, profileId: item.profileId, name: item.groupName, artwork: item.groupArtwork, trackKeys: [] });
     playlists.get(item.groupId).trackKeys.push(item.key);
-    if (!tracks.has(item.key)) tracks.set(item.key, { ...item, folderName: `${folderName}/Tracks`, profileFolder: folderName });
+    if (!tracks.has(item.key)) tracks.set(item.key, { ...item, firstPlaylistId: item.groupId, profileFolder: folderName });
   }
-  return { ...snap, v: 4, items: items.map(refreshQueries), profiles: [...profiles.values()], playlists: assignPlaylistFiles([...playlists.values()]), tracks: [...tracks.values()].map(refreshQueries) };
+  const assignedPlaylists = assignPlaylistFiles([...playlists.values()]).map(pl => {
+    const profFolder = profiles.get(pl.profileId)?.folderName || '';
+    const folder = pl.folder || pl.file;
+    return { ...pl, folderName: profFolder ? `${profFolder}/${folder}` : folder };
+  });
+  const plById = new Map(assignedPlaylists.map(pl => [pl.id, pl]));
+  const normalizedTracks = [...tracks.values()].map(t => {
+    const ownerPl = plById.get(t.firstPlaylistId) || assignedPlaylists.find(pl => (pl.trackKeys || []).includes(t.key));
+    return refreshQueries({ ...t, folderName: ownerPl?.folderName || (t.profileFolder ? `${t.profileFolder}/Playlist` : 'Playlist') });
+  });
+  return { ...snap, v: 4, items: items.map(refreshQueries), profiles: [...profiles.values()], playlists: assignedPlaylists, tracks: normalizedTracks };
 }

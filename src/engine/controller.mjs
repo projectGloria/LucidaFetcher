@@ -58,7 +58,7 @@ export function identityKey(item) {
 function transferResult(done) {
   if (!done) return { outcome: 'no-download-started' };
   if (done.status !== 'completed') return { outcome: 'download-failed', message: done.status };
-  return { outcome: 'completed', savePath: done.savePath, file: done.file, bytes: done.bytes };
+  return { outcome: 'completed', savePath: done.savePath, file: done.file, bytes: done.bytes, service: done.service };
 }
 
 export class Controller {
@@ -168,6 +168,11 @@ export class Controller {
     const derived = [];
     for (const pl of this.playlists.values()) {
       const prof = this.profiles.get(pl.profileId);
+      const plFolder = pl.folder || pl.file || String(pl.name || 'Playlist').replace(/[<>:"/\\|?*\x00-\x1f]+/g, '_').trim();
+      const defaultPlFolder = prof?.folderName ? `${prof.folderName}/${plFolder}` : plFolder;
+      const resolvedFolderName = (pl.folderName && !/\/Playlists$/i.test(pl.folderName) && pl.folderName !== 'Playlists')
+        ? pl.folderName
+        : defaultPlFolder;
       (pl.trackKeys || []).forEach((key, index) => {
         const track = this.tracks.get(key);
         if (!track) return;
@@ -179,7 +184,7 @@ export class Controller {
             groupId: pl.id,
             groupName: pl.name,
             groupArtwork: pl.artwork || track.item.image,
-            folderName: pl.folderName || (prof ? `${prof.folderName}/Playlists` : 'Playlists'),
+            folderName: resolvedFolderName,
             profileId: prof?.id || pl.profileId,
             profileName: prof?.name || prof?.user,
             profileUser: prof?.user,
@@ -209,6 +214,11 @@ export class Controller {
     const pl = this.playlists.get(playlistId);
     if (!pl) return [];
     const prof = this.profiles.get(pl.profileId);
+    const plFolder = pl.folder || pl.file || String(pl.name || 'Playlist').replace(/[<>:"/\\|?*\x00-\x1f]+/g, '_').trim();
+    const defaultPlFolder = prof?.folderName ? `${prof.folderName}/${plFolder}` : plFolder;
+    const resolvedFolderName = (pl.folderName && !/\/Playlists$/i.test(pl.folderName) && pl.folderName !== 'Playlists')
+      ? pl.folderName
+      : defaultPlFolder;
     return (pl.trackKeys || []).map((key, index) => {
       const track = this.tracks.get(key);
       if (!track) return null;
@@ -219,6 +229,7 @@ export class Controller {
           ...track.item,
           groupId: pl.id,
           groupName: pl.name,
+          folderName: resolvedFolderName,
           profileId: prof?.id || pl.profileId,
         },
         status: track.status,
@@ -284,7 +295,9 @@ export class Controller {
       if (!rec || (update.item && update.item !== rec.item) || !update.image) continue;
       rec.item.image = update.image;
       rec.item.artworkPending = false;
-      if (this.tracks.get(update.id) === rec) rec.item.groupArtwork = update.image;
+      if (this.tracks.get(update.id) === rec && !this.playlists.get(rec.firstPlaylistId)?.artwork) {
+        rec.item.groupArtwork = update.image;
+      }
       changed++;
     }
     if (changed) this._emit();
@@ -393,12 +406,17 @@ export class Controller {
 
     // Register playlists
     for (const pl of assignPlaylistFiles(playlists)) {
+      const folder = pl.folder || pl.file || String(pl.name || 'Playlist').replace(/[<>:"/\\|?*\x00-\x1f]+/g, '_').trim();
+      const folderName = (pl.folderName && !/\/Playlists$/i.test(pl.folderName) && pl.folderName !== 'Playlists')
+        ? pl.folderName
+        : (profileMeta.folderName ? `${profileMeta.folderName}/${folder}` : folder);
       this.playlists.set(pl.id, {
         id: pl.id,
         name: pl.name,
-        file: pl.file || `Playlists/${String(pl.name || 'Playlist').replace(/[<>:"/\\|?*\x00-\x1f]+/g, '_').trim()}.m3u8`,
+        folder,
+        file: folder,
         artwork: pl.artwork || pl.image,
-        folderName: pl.folderName,
+        folderName,
         trackKeys: [...(pl.trackKeys || [])],
         profileId: profId,
       });
@@ -421,7 +439,9 @@ export class Controller {
         // Reimporting repairs artwork on completed/shared tracks too.
         if ((meta.image || meta.artwork) && !(meta.artworkPending && existing.item.artworkPending === false)) {
           existing.item.image = meta.image || meta.artwork;
-          existing.item.groupArtwork = existing.item.image;
+          if (!this.playlists.get(existing.firstPlaylistId)?.artwork) {
+            existing.item.groupArtwork = existing.item.image;
+          }
           existing.item.artworkPending = meta.artworkPending;
         }
         if (!existing.firstPlaylistId && firstPlaylistForKey.has(key)) {
@@ -429,6 +449,14 @@ export class Controller {
         }
         continue;
       }
+
+      const firstPlId = firstPlaylistForKey.get(key) || null;
+      const firstPl = firstPlId ? this.playlists.get(firstPlId) : null;
+      const defaultTrackFolder = firstPl?.folderName
+        || (profileMeta.folderName ? `${profileMeta.folderName}/Playlist` : 'Playlist');
+      const trackFolderName = (meta.folderName && !/\/Tracks$/i.test(meta.folderName) && meta.folderName !== 'Tracks')
+        ? meta.folderName
+        : defaultTrackFolder;
 
       const isDownloaded = meta.status === 'downloaded' || meta.status === COMPLETED;
       const item = {
@@ -443,10 +471,11 @@ export class Controller {
         image: meta.image || meta.artwork,
         artworkPending: meta.artworkPending,
         durationSec: meta.durationSec,
-        folderName: meta.folderName || (profileMeta.folderName ? `${profileMeta.folderName}/Tracks` : 'Tracks'),
+        folderName: trackFolderName,
         profileId: profId,
         profileFolder: meta.profileFolder || profileMeta.folderName,
-        groupArtwork: meta.image || meta.artwork,
+        groupName: firstPl?.name || null,
+        groupArtwork: firstPl?.artwork || meta.image || meta.artwork,
         searchVariants: meta.searchVariants && meta.searchVariants.length
           ? meta.searchVariants
           : buildSearchVariants(meta.title, meta.artist, meta.album),
@@ -454,6 +483,7 @@ export class Controller {
 
       const rec = {
         item,
+        transferService: meta.transferService || meta.downloadService || null,
         status: isDownloaded ? COMPLETED : [SKIPPED, CANCELLED].includes(meta.status) ? meta.status : QUEUED,
         statusText: isDownloaded ? 'Downloaded' : meta.statusText || 'Waiting in queue',
         tried: meta.tried || [],
@@ -465,7 +495,7 @@ export class Controller {
         bytes: meta.bytes || null,
         receivedBytes: meta.bytes || 0,
         totalBytes: meta.bytes || 0,
-        firstPlaylistId: firstPlaylistForKey.get(key) || null,
+        firstPlaylistId: firstPlId,
       };
 
       this.tracks.set(key, rec);
@@ -532,7 +562,8 @@ export class Controller {
       if (ctl.signal.aborted) { this._set(rec, CANCELLED, 'Cancelled'); return; }
 
       if (done && done.status === 'completed') {
-        rec.result = { outcome: 'completed', savePath: done.savePath, file: done.file, bytes: done.bytes };
+        rec.result = { outcome: 'completed', savePath: done.savePath, file: done.file, bytes: done.bytes, service: done.service };
+        rec.transferService = done.service || rec.transferService;
         rec.file = done.file;
         rec.savePath = done.savePath;
         rec.bytes = done.bytes;
@@ -684,6 +715,30 @@ export class Controller {
       if (gid === groupId) ids.push(rec.item.id);
     }
     return this.remove(ids);
+  }
+
+  removeProfile(profileId) {
+    const removedKeys = new Set();
+    let removed = 0, changed = this.profiles.delete(profileId);
+    for (const [id, pl] of this.playlists) {
+      if (pl.profileId !== profileId) continue;
+      this.playlists.delete(id);
+      changed = true;
+      removed += (pl.trackKeys || []).length;
+      for (const key of pl.trackKeys || []) removedKeys.add(key);
+    }
+    const remaining = new Set([...this.playlists.values()].flatMap(pl => pl.trackKeys || []));
+    for (const key of removedKeys) {
+      if (remaining.has(key)) continue;
+      const rec = this.tracks.get(key);
+      if (rec && !this._isTerminal(rec.status)) { this.pool.cancel(key); this._abortTransfer(key); }
+      this.tracks.delete(key);
+    }
+    const looseIds = [...this.items.values()].filter(rec => rec.item.profileId === profileId).map(rec => rec.item.id);
+    // remove() emits once for all loose tracks; otherwise emit once here.
+    removed += this.remove(looseIds);
+    if (changed && !looseIds.length) this._emit();
+    return removed;
   }
 
   markServiceUnhealthy(service) {

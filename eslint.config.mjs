@@ -60,7 +60,7 @@ export default [
 
   // The renderer: ESM in a browser, plus Electron's `require` on window.
   {
-    files: ['src/ui/**/*.js', 'src/ui/**/*.jsx'],
+    files: ['src/ui/**/*.js', 'src/ui/**/*.jsx', 'test/**/*.jsx'],
     plugins: { react },
     languageOptions: {
       ecmaVersion: 2023,

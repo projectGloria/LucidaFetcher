@@ -86,10 +86,9 @@ test('profile output saves distinct playlist covers without any audio transfers'
       { id: 'a', name: 'Mix', artwork: 'a.jpg', trackKeys: [] },
       { id: 'b', name: 'Mix', artwork: 'b.jpg', trackKeys: [] },
     ] }, { validateFile: () => true, saveArtwork: (url, file) => artworks.push({ url, file }) });
-    assert.deepEqual(artworks.map(a => a.url), ['profile.jpg', 'a.jpg', 'b.jpg']);
-    assert.equal(artworks[0].file, path.join(root, 'cover.jpg'));
-    for (let i = 0; i < 2; i++) assert.equal(artworks[i + 1].file, path.join(root, state.playlists[i].file.replace(/\.m3u8$/, '.jpg')));
-    assert.notEqual(artworks[1].file, artworks[2].file);
+    assert.deepEqual(artworks.map(a => a.url), ['a.jpg', 'b.jpg']);
+    for (let i = 0; i < 2; i++) assert.equal(artworks[i].file, path.join(root, state.playlists[i].folder, 'cover.png'));
+    assert.notEqual(artworks[0].file, artworks[1].file);
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 

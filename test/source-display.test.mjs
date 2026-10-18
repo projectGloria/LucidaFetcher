@@ -13,3 +13,18 @@ test('shows only the active provider despite earlier failed attempts', () => {
   for (const status of ['queued', 'cancelled', 'skipped']) assert.equal(displayedService({ ...rec, status }), null);
 });
 
+test('metadata never identifies the audio download provider', () => {
+  const item = { service: 'spotify' };
+  assert.equal(displayedService({ status: 'completed', item }), null);
+  assert.equal(displayedService({ status: 'completed', item, transferService: 'spotify' }), null);
+  assert.equal(displayedService({ status: 'completed', item, transferService: 'qobuz' }), 'qobuz');
+  assert.equal(displayedService({ status: 'completed', item, result: { service: 'amazon' } }), 'amazon');
+  assert.equal(displayedService({ status: 'completed', item, tried: [
+    { service: 'qobuz', outcome: 'completed' }, { service: 'tidal', outcome: 'no-match' },
+  ] }), 'qobuz');
+  for (const status of ['ready', 'downloading']) {
+    assert.equal(displayedService({ status, item }), null);
+    assert.equal(displayedService({ status, item, transferService: 'spotify', step: { service: 'deezer' } }), 'deezer');
+  }
+});
+

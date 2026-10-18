@@ -4,7 +4,7 @@ import * as history from '../history.js';
 import { buildSearchVariants, buildSearchQuery } from '../../engine/variants.mjs';
 import { sanitizeFolder, joinFolder, sortPlaylists, PROFILE_ORDERS, mapPool } from '../../engine/sources.mjs';
 import { trackKey } from '../../engine/trackKey.mjs';
-import { playlistFileName } from '../../engine/profile-paths.mjs';
+import { assignPlaylistFiles } from '../../engine/profile-paths.mjs';
 import { refreshSpotifyArtwork } from '../../engine/spotify-artwork.mjs';
 
 let seq = 0;
@@ -21,7 +21,7 @@ const DEMO_RESULTS = [
   { id: 'demo-4', title: 'Instant Crush (feat. Julian Casablancas)', artist: 'Daft Punk', album: 'Random Access Memories', durationSec: 337, source: 'flac', image: 'https://e-cdns-images.dzcdn.net/images/cover/311bba0fc112d15f72c8b5a65f0456c1/500x500-000000-80-0-0.jpg' },
 ];
 
-function toQueueItem({ title, artist, album, image, folderName, group, mediaUrl, durationSec, profile, service, originalService }) {
+function toQueueItem({ title, artist, album, image, folderName, group, mediaUrl, durationSec, profile, service, originalService, trackId, isrc, artworkPending }) {
   return {
     id: `add-${Date.now()}-${seq++}`,
     title, artist,
@@ -32,6 +32,10 @@ function toQueueItem({ title, artist, album, image, folderName, group, mediaUrl,
     album: album || null,
     name: `${artist || 'Unknown artist'} - ${title}`,
     image: image || null,
+    service: service || null,
+    trackId: trackId || null,
+    isrc: isrc || null,
+    artworkPending: !!artworkPending,
     folderName: folderName || null,
     mediaUrl: mediaUrl || null,
     mediaService: null,
@@ -64,6 +68,15 @@ function formatDuration(seconds) {
 
 function artworkFor(result) {
   return result.thumbnail || result.image || null;
+}
+
+function previewError(out) {
+  if (out?.error) return out.error;
+  if (out?.kind === 'profile') return 'Use the Spotify profile tab for profile links.';
+  if (!out?.group || !Array.isArray(out.results) || !out.results.length) {
+    return 'Paste a Spotify or Deezer playlist, album, or track link.';
+  }
+  return null;
 }
 
 async function withoutExisting(items) {
@@ -240,6 +253,7 @@ export default function AddView({ onToast }) {
   const [setModal, setSetModal] = useState(null);
   useSyncExternalStore(history.subscribe, history.getSnapshot);
   const entries = history.list();
+  const recentProfiles = entries.filter(entry => entry.kind === 'profile');
 
   const resultKey = (r) => (r.isSet ? 'album:' : 'track:') + (r.id || r.url || `${r.title}|${r.artist || r.uploader}`);
   const safeFolder = folder.trim() ? sanitizeFolder(folder.trim()) : null;
@@ -303,6 +317,9 @@ export default function AddView({ onToast }) {
 
       const tracks = ((tracksRes && tracksRes.data) || []).map((t) => ({
         id: String(t.id),
+        service: 'deezer',
+        trackId: String(t.id),
+        isrc: t.isrc,
         title: t.title,
         artist: t.artist?.name || '',
         album: t.album?.title || '',
@@ -337,6 +354,7 @@ export default function AddView({ onToast }) {
       return;
     }
     const item = toQueueItem({
+      ...result,
       title: result.title,
       artist: result.artist || result.uploader || '',
       album: result.album,
@@ -354,8 +372,8 @@ export default function AddView({ onToast }) {
     setPreview(null);
     try {
       const out = await sources.resolve(link.trim(), { mode: 'auto', perTrackArtwork: true, onStatus: setBusy });
-      if (out.error) { onToast(out.error, 'err'); return; }
-      if (out.kind === 'profile') { onToast('Use the Spotify profile tab for profile links.', 'err'); return; }
+      const error = previewError(out);
+      if (error) { onToast(error, 'err'); return; }
       setPreview(out);
       history.remember({ kind: 'link', label: link.trim(), name: out.name, count: out.results.length,
                  image: out.group?.artworkUrl || '' });
@@ -373,6 +391,7 @@ export default function AddView({ onToast }) {
       return;
     }
     await queueItems(tracks.map((r) => toQueueItem({
+      ...r,
       title: r.texts[0], artist: r.texts[1] || '', album: r.album, image: r.image,
       folderName: preview.group.folderName, group: preview.group, mediaUrl: r.mediaUrl, durationSec: r.durationSec,
     })), preview.name);
@@ -458,115 +477,147 @@ export default function AddView({ onToast }) {
     const failed = [];
     let readCount = 0;
     setBusy(`Reading playlists (0 of ${list.length})…`);
-    const readPlaylists = (await mapPool(list, 2, async playlist => {
-      const out = await readOne(playlist, failed);
-      setBusy(`Reading playlists (${++readCount} of ${list.length})…`);
-      return out ? { playlist, out } : null;
-    })).filter(Boolean);
+    try {
+      const readPlaylists = (await mapPool(list, 2, async playlist => {
+        const out = await readOne(playlist, failed);
+        setBusy(`Reading playlists (${++readCount} of ${list.length})…`);
+        return out ? { playlist, out } : null;
+      })).filter(Boolean);
 
-    if (!readPlaylists.length) {
-      console.error(`profile read: 0/${list.length} playlists usable for ${info.name || info.user}`, failed);
-      onToast(`Could not read any of ${info.name || info.user}'s playlists. ${failed[0]?.error || ''}`, 'err');
-      setBusy(null);
-      return;
-    }
-
-    const ordered = order === 'default'
-      ? readPlaylists
-      : sortPlaylists(
-          readPlaylists.map((r) => ({ ...r.playlist, tracks: r.out.results.length, _read: r })),
-          order,
-        ).map((r) => r._read);
-
-    setBusy(`Deduplicating and preparing ${ordered.length} playlists…`);
-
-    const playlists = [];
-    const tracksMap = new Map();
-    let totalPlaylistEntries = 0;
-
-    for (const item of ordered) {
-      const out = item.out;
-      const plId = `${meta.id}|${out.group?.id || item.playlist.id}`;
-      const plName = out.name || item.playlist.name || 'Playlist';
-      const plRecord = {
-        id: plId,
-        name: plName,
-        file: playlistFileName(plName, plId),
-        artwork: out.group?.artworkUrl || item.playlist.image || null,
-        folderName: joinFolder(meta.folderName, 'Playlists'),
-        trackKeys: [],
-      };
-
-      for (const r of (out.results || [])) {
-        totalPlaylistEntries++;
-        let key;
-        try {
-          key = trackKey({
-            isrc: r.isrc,
-            service: r.service || meta.service,
-            trackId: r.trackId,
-            title: r.texts[0],
-            artist: r.texts[1] || '',
-          });
-        } catch {
-          continue;
-        }
-
-        plRecord.trackKeys.push(key);
-        if (!tracksMap.has(key)) {
-          tracksMap.set(key, {
-            title: r.texts[0],
-            artist: r.texts[1] || '',
-            album: r.album || null,
-            image: r.image,
-            artworkPending: r.artworkPending,
-            durationSec: r.durationSec,
-            service: r.service || meta.service,
-            trackId: r.trackId,
-            isrc: r.isrc,
-            folderName: `${meta.folderName}/Tracks`,
-          });
-        }
+      if (!readPlaylists.length) {
+        console.error(`profile read: 0/${list.length} playlists usable for ${info.name || info.user}`, failed);
+        onToast(`Could not read any of ${info.name || info.user}'s playlists. ${failed[0]?.error || ''}`, 'err');
+        return;
       }
 
-      playlists.push(plRecord);
-    }
+      const ordered = order === 'default'
+        ? readPlaylists
+        : sortPlaylists(
+            readPlaylists.map((r) => ({ ...r.playlist, tracks: r.out.results.length, _read: r })),
+            order,
+          ).map((r) => r._read);
 
-    // Check existing library on disk to avoid re-downloading
-    if (isElectron && ipc) {
-      try {
-        const existingLib = await ipc.invoke('profile-library-load', meta.folderName);
-        if (existingLib && existingLib.tracks) {
-          for (const [k, prev] of Object.entries(existingLib.tracks)) {
-            if (tracksMap.has(k) && prev.status === 'downloaded' && prev.file) {
-              const current = tracksMap.get(k);
-              tracksMap.set(k, {
-                ...current,
-                status: 'downloaded',
-                file: prev.file,
-                bytes: prev.bytes,
-                savePath: prev.savePath,
-              });
-            }
+      setBusy(`Deduplicating and preparing ${ordered.length} playlists…`);
+
+      const rawPlaylists = [];
+      const tracksMap = new Map();
+      const firstPlaylistIdForKey = new Map();
+      let totalPlaylistEntries = 0;
+
+      for (const item of ordered) {
+        const out = item.out;
+        const plId = `${meta.id}|${out.group?.id || item.playlist.id}`;
+        const plName = out.name || item.playlist.name || 'Playlist';
+        const plRecord = {
+          id: plId,
+          name: plName,
+          artwork: out.group?.artworkUrl || item.playlist.image || null,
+          trackKeys: [],
+        };
+
+        for (const r of (out.results || [])) {
+          totalPlaylistEntries++;
+          let key;
+          try {
+            key = trackKey({
+              isrc: r.isrc,
+              service: r.service || meta.service,
+              trackId: r.trackId,
+              title: r.texts[0],
+              artist: r.texts[1] || '',
+            });
+          } catch {
+            continue;
+          }
+
+          plRecord.trackKeys.push(key);
+          if (!firstPlaylistIdForKey.has(key)) firstPlaylistIdForKey.set(key, plId);
+          if (!tracksMap.has(key)) {
+            tracksMap.set(key, {
+              title: r.texts[0],
+              artist: r.texts[1] || '',
+              album: r.album || null,
+              image: r.image,
+              artworkPending: r.artworkPending,
+              durationSec: r.durationSec,
+              service: r.service || meta.service,
+              trackId: r.trackId,
+              isrc: r.isrc,
+            });
           }
         }
-      } catch (e) {
-        console.warn('Could not read existing library manifest:', e);
+
+        rawPlaylists.push(plRecord);
       }
-    }
 
-    const queuedTracks = getController().addProfile(meta, playlists, tracksMap);
-    setBusy(null);
-    refreshSpotifyArtwork(getController(), sources).catch(error => console.warn('Artwork refresh failed:', error.message));
+      const playlists = assignPlaylistFiles(rawPlaylists).map((pl) => ({
+        ...pl,
+        folderName: joinFolder(meta.folderName, pl.folder || pl.file),
+      }));
+      const plById = new Map(playlists.map((pl) => [pl.id, pl]));
+      for (const [k, track] of tracksMap.entries()) {
+        const ownerPl = plById.get(firstPlaylistIdForKey.get(k)) || playlists[0];
+        tracksMap.set(k, {
+          ...track,
+          folderName: ownerPl?.folderName || meta.folderName,
+        });
+      }
 
-    const note = failed.length ? ` ${failed.length} playlist${failed.length === 1 ? '' : 's'} could not be read.` : '';
-    const dedupedCount = totalPlaylistEntries - tracksMap.size;
-    const dedupNote = dedupedCount > 0 ? ` (${dedupedCount} duplicate${dedupedCount === 1 ? '' : 's'} skipped)` : '';
+      // Check existing library and manifest on disk to avoid re-downloading
+      if (isElectron && ipc) {
+        try {
+          const existingLib = await ipc.invoke('profile-library-load', meta.folderName);
+          if (existingLib && existingLib.tracks) {
+            for (const [k, prev] of Object.entries(existingLib.tracks)) {
+              if (tracksMap.has(k) && prev.status === 'downloaded' && prev.file) {
+                const current = tracksMap.get(k);
+                tracksMap.set(k, {
+                  ...current,
+                  status: 'downloaded',
+                  file: prev.file,
+                  bytes: prev.bytes,
+                  savePath: prev.savePath,
+                  transferService: prev.downloadService || null,
+                });
+              }
+            }
+          }
+          const pendingEntries = [...tracksMap.entries()].filter(([, t]) => t.status !== 'downloaded');
+          if (pendingEntries.length) {
+            const checks = await ipc.invoke('downloads-check', pendingEntries.map(([k, t]) => ({
+              key: k, folderName: t.folderName, title: t.title, artist: t.artist, durationSec: t.durationSec, isrc: t.isrc,
+            })));
+            pendingEntries.forEach(([k, current], i) => {
+              if (checks?.[i]?.done) {
+                tracksMap.set(k, {
+                  ...current,
+                  status: 'downloaded',
+                  file: checks[i].file,
+                  bytes: checks[i].bytes,
+                  savePath: checks[i].savePath,
+                  transferService: checks[i].service || null,
+                });
+              }
+            });
+          }
+        } catch (e) {
+          console.warn('Could not read existing library manifest:', e);
+        }
+      }
 
-    onToast(
-      `Queued ${queuedTracks} unique track${queuedTracks === 1 ? '' : 's'} across ${playlists.length} playlists${dedupNote}.${note}`,
-      queuedTracks ? undefined : 'err'
-    );
+      const queuedTracks = getController().addProfile(meta, playlists, tracksMap);
+      refreshSpotifyArtwork(getController(), sources).catch(error => console.warn('Artwork refresh failed:', error.message));
+
+      const note = failed.length ? ` ${failed.length} playlist${failed.length === 1 ? '' : 's'} could not be read.` : '';
+      const dedupedCount = totalPlaylistEntries - tracksMap.size;
+      const dedupNote = dedupedCount > 0 ? ` (${dedupedCount} duplicate${dedupedCount === 1 ? '' : 's'} skipped)` : '';
+
+      onToast(
+        `Queued ${queuedTracks} unique track${queuedTracks === 1 ? '' : 's'} across ${playlists.length} playlists${dedupNote}.${note}`,
+        queuedTracks ? undefined : 'err'
+      );
+    } catch (error) { onToast(error.message || 'Could not queue that profile.', 'err'); }
+    finally { setBusy(null); }
   };
 
 
@@ -589,6 +640,7 @@ export default function AddView({ onToast }) {
                    image: out.group?.artworkUrl || playlist.image || '' });
       }
       await queueItems(out.results.map((r) => toQueueItem({
+        ...r,
         title: r.texts[0], artist: r.texts[1] || '', image: r.image,
         folderName: group.folderName, group, profile: meta,
       })), out.name);
@@ -605,6 +657,7 @@ export default function AddView({ onToast }) {
       setProfileName(entry.user || entry.label);
       const info = entry.info || { service: 'spotify', user: entry.user || entry.label, name: entry.name || entry.label, image: entry.image || '' };
       setProfile({ user: entry.user || entry.label, service: info.service, info, playlists: entry.results || [] });
+      history.remember({ ...entry, at: Date.now() });
       return;
     }
     if (entry.kind === 'search') {
@@ -620,7 +673,8 @@ export default function AddView({ onToast }) {
     setBusy('Reading link…');
     try {
       const out = await sources.resolve(entry.label, { mode: 'auto', perTrackArtwork: true, onStatus: setBusy });
-      if (out.error) { onToast(out.error, 'err'); return; }
+      const error = previewError(out);
+      if (error) { onToast(error, 'err'); return; }
       setPreview(out);
     } catch (error) { onToast(error.message, 'err'); }
     finally { setBusy(null); }
@@ -667,6 +721,7 @@ export default function AddView({ onToast }) {
                    image: out.group?.artworkUrl || row.image || '' });
       }
       await queueItems(out.results.map((r) => toQueueItem({
+        ...r,
         title: r.texts[0], artist: r.texts[1] || '', image: r.image,
         folderName: out.group?.folderName, group: out.group,
         album: out.name || row.title,
@@ -677,6 +732,7 @@ export default function AddView({ onToast }) {
   };
 
   const setModalItem = (r) => toQueueItem({
+    ...r,
     title: r.texts[0], artist: r.texts[1] || '', image: r.image,
     folderName: setModal.preview?.group?.folderName, group: setModal.preview?.group,
     album: r.album || setModal.preview?.name || setModal.title,
@@ -708,7 +764,7 @@ export default function AddView({ onToast }) {
         <div className="add-hero">
           <div className="mode-tabs" role="tablist" aria-label="Add music method">
             {MODES.map((item) => <button key={item.id} role="tab" aria-selected={mode === item.id}
-              className="mode-tab" onClick={() => { setMode(item.id); setBusy(null); }}><span aria-hidden="true">{item.icon}</span>{item.label}</button>)}
+              className="mode-tab" disabled={!!busy} onClick={() => setMode(item.id)}><span aria-hidden="true">{item.icon}</span>{item.label}</button>)}
           </div>
 
           {mode === 'search' && <form className="discovery-form" onSubmit={search}>
@@ -735,6 +791,26 @@ export default function AddView({ onToast }) {
               <input id="profile-search" className="input" autoFocus placeholder="thesimulacrum" value={profileName} onChange={(e) => { setProfileName(e.target.value); setProfile(null); }} />
               <button className="btn btn-primary search-button" disabled={!profileName.trim() || !!busy}>Show playlists</button>
             </div><div className="form-foot"><span>Only public playlists can be shown.</span></div>
+            {recentProfiles.length > 0 && (
+              <div className="recent-profiles" aria-label="Recent profiles">
+                <div className="recent-profiles-head">
+                  <span>Recent profiles</span>
+                  {recentProfiles.length > 6 && <button type="button" className="btn btn-sm btn-ghost" disabled={!!busy} onClick={() => setMode('history')}>View all</button>}
+                </div>
+                <div className="recent-profile-list">
+                  {recentProfiles.slice(0, 6).map(entry => (
+                    <button key={entry.id} type="button" className="recent-profile" disabled={!!busy} onClick={() => openHistory(entry)}>
+                      {entry.image ? <img src={entry.image} alt="" loading="lazy" /> : <span className="recent-profile-avatar" aria-hidden="true">◎</span>}
+                      <span className="recent-profile-copy">
+                        <strong>{entry.name || entry.label}</strong>
+                        <span>{entry.user || entry.label} · {entry.count ?? entry.results?.length ?? 0} playlists</span>
+                      </span>
+                      <span className="recent-profile-open">Open saved</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </form>}
         </div>
 
