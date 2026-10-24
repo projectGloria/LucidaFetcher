@@ -1,11 +1,5 @@
-import { useMemo, useRef } from 'react';
-import { useItems, useTransferProgress } from '../engine.js';
-
-// One panel at the bottom of the window for whatever is transferring right now.
-//
-// Deliberately a single panel rather than a stack of cards: three floating
-// cards read as three notifications competing for attention, when they are
-// really one fact - "this is what the app is doing" - with three lines in it.
+import { useMemo, useRef, useState } from 'react';
+import { useItems, useTransferProgress, getController } from '../engine.js';
 
 const MAX_ROWS = 3;
 
@@ -21,24 +15,17 @@ function fmtBytes(n, digits) {
 export default function DownloadDock() {
   useTransferProgress();
   const items = useItems();
-  // Only structural changes rebuild the membership list. Progress changes the
-  // live getters on these records without expanding every playlist again.
+  const [minimized, setMinimized] = useState(false);
+
   const { moving, waiting, active } = useMemo(() => {
     const unique = [...new Map(items.map(rec => [rec.item.id, rec])).values()];
     const transferring = unique.filter(r => r.status === 'downloading');
     const ready = unique.filter(r => r.status === 'ready');
     return { moving: transferring, waiting: ready, active: [...transferring, ...ready] };
   }, [items]);
-  // Byte counters are cumulative, so a rate has to be derived from two
-  // readings. They live in a ref because they are display detail: as state they
-  // would re-render the dock on their own account as well as on every progress
-  // event, which arrive several times a second per track.
+
   const samples = useRef(new Map());
 
-  // Moving files first, then the ones already fetched and waiting their turn.
-  // Both belong in here: the panel answers "what is the app doing", and a track
-  // that has been scraped and handed to the network is as much a live piece of
-  // work as one whose bytes happen to be arriving this second.
   if (!active.length) {
     if (samples.current.size) samples.current.clear();
     return null;
@@ -58,8 +45,6 @@ export default function DownloadDock() {
     if (!prev) {
       samples.current.set(rec.item.id, { bytes: got, at: now, speed: null });
     } else if (now - prev.at >= 600) {
-      // Smoothed, because a raw delta between two samples jumps around far too
-      // much to read as a number.
       const inst = (Math.max(0, got - prev.bytes) * 1000) / (now - prev.at);
       speed = prev.speed ? prev.speed * 0.6 + inst * 0.4 : inst;
       samples.current.set(rec.item.id, { bytes: got, at: now, speed });
@@ -71,7 +56,7 @@ export default function DownloadDock() {
   const shown = rows.slice(0, MAX_ROWS);
 
   return (
-    <div className="dock" role="status" aria-live="off">
+    <div className={`dock ${minimized ? 'dock-minimized' : ''}`} role="status" aria-live="off">
       <div className="dock-head">
         <span className="dock-pulse" aria-hidden="true" />
         <span className="dock-head-label">
@@ -79,14 +64,24 @@ export default function DownloadDock() {
           {waiting.length > 0 && ` · ${waiting.length} ready`}
         </span>
         {totalRate > 0 && <span className="dock-head-rate">{fmtBytes(totalRate, 1)}/s</span>}
+        <button
+          type="button"
+          className="btn btn-sm btn-ghost btn-icon dock-toggle"
+          onClick={() => setMinimized((m) => !m)}
+          title={minimized ? 'Expand transfer deck' : 'Minimize transfer deck'}
+          aria-label={minimized ? 'Expand transfer deck' : 'Minimize transfer deck'}
+        >
+          {minimized ? '▴' : '▾'}
+        </button>
       </div>
 
-      <div className="dock-rows">
+      <div className="dock-rows" style={minimized ? { display: 'none' } : undefined}>
         {shown.map(({ rec, speed }) => {
           const isReady = rec.status === 'ready';
           const pct = typeof rec.progress === 'number' ? Math.round(rec.progress * 100) : null;
           const size = fmtBytes(rec.totalBytes);
           const got = fmtBytes(rec.receivedBytes);
+          const targetId = rec.id || rec.item.id;
           return (
             <div className="dock-row" key={rec.item.id}>
               {rec.item.image
@@ -95,7 +90,21 @@ export default function DownloadDock() {
               <div className="dock-body">
                 <div className="dock-line">
                   <span className="dock-title truncate">{rec.item.title || rec.item.name}</span>
-                  <span className="dock-pct">{isReady ? 'Ready' : pct === null ? '—' : `${pct}%`}</span>
+                  <span className="dock-row-controls">
+                    <span className="dock-pct">{isReady ? 'Ready' : pct === null ? '—' : `${pct}%`}</span>
+                    <button
+                      type="button"
+                      className="dock-action-btn"
+                      onClick={() => getController()?.pauseItem?.(targetId)}
+                      title="Pause this transfer"
+                    >❚❚</button>
+                    <button
+                      type="button"
+                      className="dock-action-btn danger"
+                      onClick={() => getController()?.cancel?.(targetId)}
+                      title="Cancel this transfer"
+                    >✕</button>
+                  </span>
                 </div>
                 <div className={`progress dock-bar ${isReady ? 'waiting' : pct === null ? 'indeterminate' : ''}`}>
                   <i style={{ width: isReady ? 0 : pct === null ? undefined : `${pct}%` }} />
@@ -113,7 +122,7 @@ export default function DownloadDock() {
         })}
       </div>
 
-      {active.length > MAX_ROWS && (
+      {!minimized && active.length > MAX_ROWS && (
         <div className="dock-foot">+{active.length - MAX_ROWS} more in flight</div>
       )}
     </div>

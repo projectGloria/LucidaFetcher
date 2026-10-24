@@ -82,11 +82,11 @@ export default function App() {
       <Sidebar view={view} setView={setView} />
       <main className="main">
         <RenderBoundary key={view}>
-        {view === 'queue' && <QueueView onToast={toast} preferences={config.queueView} onPreferencesChange={saveQueueView} />}
-        {view === 'add' && <AddView onToast={toast} />}
-        {view === 'settings' && (
-          <SettingsView config={config} setConfig={setConfig} onToast={toast} throttleOff={throttleOff} />
-        )}
+          {view === 'queue' && <QueueView onToast={toast} preferences={config.queueView} onPreferencesChange={saveQueueView} />}
+          {view === 'add' && <AddView onToast={toast} />}
+          {view === 'settings' && (
+            <SettingsView config={config} setConfig={setConfig} onToast={toast} throttleOff={throttleOff} />
+          )}
         </RenderBoundary>
       </main>
       <DownloadDock />
@@ -188,7 +188,7 @@ function Sidebar({ view, setView }) {
     prevDone.current = stats;
   }, [stats.completed, stats.skipped, stats.queued, stats.active, stats.total]);
 
-  const counts = { queue: stats.queued + stats.active };
+  const counts = { queue: stats.queued + stats.active + (stats.paused || 0) };
   useSyncExternalStore(history.subscribe, history.getSnapshot);
   const looked = history.list().length;
 
@@ -216,12 +216,12 @@ function Sidebar({ view, setView }) {
 
       <div className="sidebar-foot">
         <div className="stat-grid">
-          <div className="stat accent"><div className="n">{stats.active}</div><div className="l">Working</div></div>
+          <div className="stat accent"><div className="n">{stats.active}</div><div className="l">Active</div></div>
           <div className="stat ok"><div className="n">{stats.completed}</div><div className="l">Done</div></div>
           <div className="stat warn"><div className="n">{stats.skipped}</div><div className="l">Missing</div></div>
           <div className="stat"><div className="n">{looked}</div><div className="l">History</div></div>
         </div>
-        <TransportControls paused={paused} idle={stats.queued + stats.active === 0} />
+        <TransportControls paused={paused} idle={stats.queued + stats.active === 0} pausedItems={stats.paused || 0} />
       </div>
     </aside>
   );
@@ -229,22 +229,43 @@ function Sidebar({ view, setView }) {
 
 // A disabled Pause is a control that answers a question nobody asked. With
 // nothing running - and nothing held back by a pause - say so instead.
-function TransportControls({ paused, idle }) {
+function TransportControls({ paused, idle, pausedItems = 0 }) {
   const c = getController();
   const retrying = c.keepTrying && !c.retryStopped && c.stats.skipped > 0;
-  if (idle && !paused && !retrying) {
+  if (idle && !paused && !retrying && pausedItems === 0) {
     return <div className="transport-idle">No downloads in progress</div>;
   }
+  const resumeAllPaused = () => {
+    const items = c.getItems?.() || [];
+    for (const item of items) {
+      if (item.status === 'paused') c.resumeItem?.(item.id);
+    }
+    if (paused) c.resume();
+  };
   return (
-    <div className="row-actions">
-      <button
-        className="btn btn-sm"
-        style={{ flex: 1 }}
-        onClick={() => (paused ? c.resume() : c.pause())}
-      >
-        {paused ? '▶ Resume' : '❚❚ Pause'}
-      </button>
-      <button className="btn btn-sm btn-danger" onClick={() => c.cancelAll()}>Cancel all</button>
+    <div className="transport-stack">
+      {(!idle || paused || retrying) && (
+        <div className="row-actions">
+          <button
+            className="btn btn-sm"
+            style={{ flex: 1 }}
+            onClick={() => (paused ? c.resume() : c.pause())}
+          >
+            {paused ? '▶ Resume' : '❚❚ Pause'}
+          </button>
+          <button className="btn btn-sm btn-danger" onClick={() => c.cancelAll()}>Cancel all</button>
+        </div>
+      )}
+      {pausedItems > 0 && (
+        <button
+          className="btn btn-sm btn-resume"
+          style={{ width: '100%' }}
+          onClick={resumeAllPaused}
+          title="Resume all individually paused tracks"
+        >
+          ▶ Resume {pausedItems} paused
+        </button>
+      )}
     </div>
   );
 }

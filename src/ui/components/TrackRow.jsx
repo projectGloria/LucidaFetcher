@@ -3,6 +3,7 @@ import { getController, isElectron, ipc } from '../engine.js';
 import { serviceLabel } from '../../engine/status.mjs';
 import { displayedService } from '../../engine/source-display.mjs';
 import SourceIcon from './SourceIcon.jsx';
+
 // Past this, a search reads as slow rather than routine - long enough that
 // most real answers have already come back, short enough to say something
 // before the user starts wondering if the app is frozen.
@@ -12,24 +13,42 @@ const SLOW_AFTER_MS = 45000;
 // list of two hundred rows, most of them are searching most of the time, and
 // making that state loud turns the whole list into noise.
 const TONE = {
-  queued:      { pill: '',        label: 'Queued' },
+  queued:      { pill: '',            label: 'Queued' },
+  paused:      { pill: 'paused-tone', label: 'Paused' },
   searching:   { pill: 'accent live', label: 'Working' },
+  fetching:    { pill: 'accent live', label: 'Working' },
   // Fetched and handed to the network, nothing moving yet. Given its own tone
   // rather than folded into "Downloading": the whole point is being able to see
   // at a glance how much work is already banked ahead of the transfers.
   ready:       { pill: 'info',        label: 'Ready' },
   downloading: { pill: 'info live',   label: 'Downloading' },
-  completed:   { pill: 'ok',      label: 'Done' },
-  skipped:     { pill: 'warn',    label: 'Missing' },
-  cancelled:   { pill: '',        label: 'Cancelled' },
+  completed:   { pill: 'ok',          label: 'Done' },
+  skipped:     { pill: 'warn',        label: 'Missing' },
+  cancelled:   { pill: '',            label: 'Cancelled' },
 };
 
-export default function TrackRow({ rec }) {
+export default function TrackRow({
+  rec,
+  queueIndex = null,
+  draggableQueue = false,
+  onDragStart,
+  onDragOver,
+  onDrop,
+  isDragTarget = false,
+  onToast,
+}) {
   const { item, status, statusText } = rec;
+  const id = rec.id || item.id;
   const tone = TONE[status] || TONE.queued;
-  const busy = status === 'searching' || status === 'ready' || status === 'downloading';
+  const busy = status === 'searching' || status === 'fetching' || status === 'ready' || status === 'downloading';
+  const isQueued = status === 'queued';
+  const isPaused = status === 'paused';
+  const canPause = busy || isQueued;
+  const canResume = isPaused || status === 'cancelled' || status === 'skipped';
+  const canPrioritize = (isQueued || isPaused) && (!rec.priority || (queueIndex != null && queueIndex > 1));
+
   const pct = typeof rec.progress === 'number' ? Math.round(rec.progress * 100) : null;
-  const elapsed = useElapsed(status === 'searching' ? rec.attemptStartedAt : null);
+  const elapsed = useElapsed(status === 'searching' || status === 'fetching' ? rec.attemptStartedAt : null);
   const slow = elapsed !== null && elapsed >= SLOW_AFTER_MS;
   useRowProgress(rec);
 
@@ -46,14 +65,39 @@ export default function TrackRow({ rec }) {
     }).catch(() => {});
   };
 
+  const rowClasses = [
+    'row',
+    status === 'completed' ? 'done' : '',
+    status === 'skipped' ? 'skipped' : '',
+    isPaused ? 'paused-row' : '',
+    rec.priority && (isQueued || busy) ? 'priority-row' : '',
+    isDragTarget ? 'drag-over' : '',
+  ].filter(Boolean).join(' ');
+
   return (
-    <div className={`row ${status === 'completed' ? 'done' : ''} ${status === 'skipped' ? 'skipped' : ''}`}>
-      {item.image
-        ? <img className="art" src={item.image} alt="" loading="lazy" referrerPolicy="no-referrer" />
-        : <div className="art" aria-hidden="true" />}
+    <div
+      className={rowClasses}
+      draggable={draggableQueue && (isQueued || isPaused)}
+      onDragStart={onDragStart ? (e) => onDragStart(e, id) : undefined}
+      onDragOver={onDragOver ? (e) => onDragOver(e, id) : undefined}
+      onDrop={onDrop ? (e) => onDrop(e, id) : undefined}
+    >
+      <div className="art-wrap">
+        {item.image
+          ? <img className="art" src={item.image} alt="" loading="lazy" referrerPolicy="no-referrer" />
+          : <div className="art" aria-hidden="true" />}
+        {queueIndex !== null && (isQueued || busy) && (
+          <span className="queue-rank" title={`Queue position #${queueIndex}`}>#{queueIndex}</span>
+        )}
+      </div>
 
       <div className="info">
-        <div className="title">{item.title || item.name}</div>
+        <div className="title">
+          {rec.priority && (isQueued || busy) && (
+            <span className="priority-badge" title="Prioritized track">⚡</span>
+          )}
+          {item.title || item.name}
+        </div>
         <div className="artist">{item.artist}</div>
         {/* The whole point of the redesign: not "Fetching…" but which source is
             being asked, and what the last one actually said. */}
@@ -80,20 +124,44 @@ export default function TrackRow({ rec }) {
       </span>
 
       <div className="actions">
+        {canPause && (
+          <button
+            className="btn btn-sm btn-ghost btn-icon"
+            onClick={() => getController().pauseItem?.(id)}
+            title="Pause this track"
+          >❚❚</button>
+        )}
+        {canResume && (
+          <button
+            className="btn btn-sm btn-ghost btn-icon"
+            onClick={() => getController().resumeItem?.(id)}
+            title={isPaused ? 'Resume this track' : 'Retry this track'}
+          >▶</button>
+        )}
+        {canPrioritize && (
+          <button
+            className="btn btn-sm btn-ghost btn-icon"
+            onClick={() => {
+              getController().downloadNow?.(id);
+              onToast?.(`Moved “${item.title || item.name}” to top of queue.`);
+            }}
+            title="Download Now (move to top of queue)"
+          >⚡</button>
+        )}
         {status === 'completed' && isElectron && (
           <button className="btn btn-sm btn-ghost btn-icon" onClick={openFolder} title="Show in folder">⌕</button>
         )}
         {(status === 'queued' || busy) && (
           <button
             className="btn btn-sm btn-ghost btn-icon btn-danger"
-            onClick={() => getController().cancel(rec.id || item.id)}
+            onClick={() => getController().cancel(id)}
             title="Cancel this track"
           >✕</button>
         )}
         {!busy && status !== 'queued' && (
           <button
             className="btn btn-sm btn-ghost btn-icon btn-danger"
-            onClick={() => getController().remove(rec.id || item.id)}
+            onClick={() => getController().remove(id)}
             title="Remove from the list (the file, if any, stays)"
           >🗑</button>
         )}

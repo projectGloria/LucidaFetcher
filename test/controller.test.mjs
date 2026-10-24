@@ -520,3 +520,100 @@ test('cancelling an inline transfer always notifies cancelTransfer', async () =>
   c.cancel('t1');
   assert.deepEqual(cancelledTransfers, ['t1']);
 });
+
+
+// ---- custom queue, priority preemption & casual per-item pause/resume -----
+
+test('pauseItem pauses an active track, frees its worker slot for the next track, and resumeItem finishes it', async () => {
+  const order = [];
+  let releaseA;
+  const gateA = new Promise((r) => { releaseA = r; });
+
+  const worker = {
+    async run(item, step, signal) {
+      order.push(`start:${item.id}`);
+      if (item.id === 'a' && order.filter((x) => x === 'start:a').length === 1) {
+        await Promise.race([
+          gateA,
+          new Promise((r) => signal.addEventListener('abort', r, { once: true })),
+        ]);
+        if (signal.aborted) return { outcome: 'cancelled' };
+      }
+      order.push(`done:${item.id}`);
+      return { outcome: 'completed' };
+    },
+  };
+
+  const c = new Controller({ getWorker: () => worker, services: ['qobuz'], concurrency: 1 });
+  c.add([track('a', { key: 'a' }), track('b', { key: 'b' })]);
+  await settle();
+
+  assert.equal(c.getItem('a').status, 'searching');
+  assert.equal(c.pauseItem('a'), true);
+  assert.equal(c.getItem('a').status, 'paused');
+  assert.equal(c.stats.paused, 1);
+
+  // Freed slot runs 'b' immediately while 'a' stays paused
+  await c.pool.onIdle();
+  assert.equal(c.getItem('b').status, COMPLETED);
+  assert.equal(c.getItem('a').status, 'paused');
+
+  // Resuming 'a' picks it back up and completes it
+  releaseA();
+  assert.equal(c.resumeItem('a'), true);
+  await c.pool.onIdle();
+  assert.equal(c.getItem('a').status, COMPLETED);
+  assert.equal(c.stats.paused, 0);
+});
+
+test('priority add with preempt interrupts a busy non-priority worker without cancelling the preempted item', async () => {
+  const completedOrder = [];
+  const worker = {
+    async run(item, step, signal) {
+      await new Promise((resolve) => {
+        const t = setTimeout(resolve, 15);
+        signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+      });
+      if (signal.aborted) return { outcome: 'cancelled' };
+      completedOrder.push(item.id);
+      return { outcome: 'completed' };
+    },
+  };
+
+  const c = new Controller({ getWorker: () => worker, services: ['qobuz'], concurrency: 1 });
+  c.add([track('slow-1', { key: 'k1' }), track('slow-2', { key: 'k2' })]);
+  await new Promise((r) => setTimeout(r, 3));
+
+  // Preempt with an urgent track while slow-1 is mid-run
+  c.add(track('urgent', { key: 'ku' }), { priority: true, preempt: true });
+  await c.pool.onIdle();
+
+  assert.equal(completedOrder[0], 'urgent', 'urgent track finishes first');
+  assert.deepEqual(completedOrder, ['urgent', 'slow-1', 'slow-2'], 'preempted track resumes right after urgent');
+  assert.equal(c.stats.completed, 3);
+});
+
+test('pauseGroup and resumeGroup control a playlist independently of other groups', async () => {
+  const { c } = makeController({ qobuz: { outcome: 'completed' } });
+  c.pause();
+  c.add([
+    track('g1-a', { key: 'g1a', groupId: 'g1', groupName: 'Playlist 1' }),
+    track('g1-b', { key: 'g1b', groupId: 'g1', groupName: 'Playlist 1' }),
+    track('g2-a', { key: 'g2a', groupId: 'g2', groupName: 'Playlist 2' }),
+  ]);
+
+  assert.equal(c.pauseGroup('g1'), 2);
+  assert.equal(c.getItem('g1-a').status, 'paused');
+  assert.equal(c.getItem('g1-b').status, 'paused');
+  assert.equal(c.getItem('g2-a').status, 'queued');
+
+  c.resume();
+  await c.pool.onIdle();
+  assert.equal(c.getItem('g2-a').status, COMPLETED);
+  assert.equal(c.getItem('g1-a').status, 'paused');
+
+  assert.equal(c.resumeGroup('g1'), 2);
+  await c.pool.onIdle();
+  assert.equal(c.getItem('g1-a').status, COMPLETED);
+  assert.equal(c.getItem('g1-b').status, COMPLETED);
+});

@@ -396,7 +396,7 @@ export function attachPersistence(controller, ipcRenderer, log = () => {}) {
             transferService: checks[i].service || item.transferService || null, status: 'completed' };
         }
         if (item.skippedInEarlierRun || item.status === 'skipped') { staySkipped++; return { ...item, status: 'skipped' }; }
-        if (item.status === 'cancelled') return item;
+        if (item.status === 'cancelled' || item.status === 'paused') return item;
         restored++;
         return { ...item, status: 'queued' };
       });
@@ -412,9 +412,9 @@ export function attachPersistence(controller, ipcRenderer, log = () => {}) {
         const rec = controller.getItem(item.id);
         if (!rec) continue;
         rec.status = item.status;
-        rec.statusText = item.statusText || (item.status === 'skipped' ? 'Missing from an earlier run' : 'Waiting in queue');
+        rec.statusText = item.statusText || (item.status === 'skipped' ? 'Missing from an earlier run' : item.status === 'paused' ? 'Paused' : 'Waiting in queue');
         rec.tried = item.tried || [];
-        if (['skipped', 'cancelled'].includes(item.status)) controller.pool.cancel(item.id);
+        if (['skipped', 'cancelled', 'paused'].includes(item.status)) controller.pool.cancel(item.id);
       }
       const resumeIds = new Set(toResume);
       controller.pool.submit([...controller.tracks.values()].filter(rec => rec.status === 'queued' && !resumeIds.has(rec.item.id)).map(rec => rec.item));

@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
-import { useProfileTree, useStats, getController } from '../engine.js';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useProfileTree, useStats, useQueueOrder, getController } from '../engine.js';
 import TrackRow from '../components/TrackRow.jsx';
 
 const FILTERS = [
   { id: 'all', label: 'All' },
   { id: 'active', label: 'Working' },
+  { id: 'paused', label: 'Paused', hideWhenZero: true },
   { id: 'done', label: 'Downloaded' },
   { id: 'missing', label: 'Missing' },
 ];
@@ -13,17 +14,20 @@ const matches = (rec, filter) => {
   if (filter === 'all') return true;
   if (filter === 'done') return rec.status === 'completed';
   if (filter === 'missing') return rec.status === 'skipped';
-  return rec.status === 'searching' || rec.status === 'ready' || rec.status === 'downloading' || rec.status === 'queued';
+  if (filter === 'paused') return rec.status === 'paused';
+  return rec.status === 'searching' || rec.status === 'fetching' || rec.status === 'ready' || rec.status === 'downloading' || rec.status === 'queued';
 };
 
 export default function QueueView({ onToast, preferences = {}, onPreferencesChange }) {
   const tree = useProfileTree();
   const stats = useStats();
+  const orderData = useQueueOrder();
   const filter = FILTERS.some(f => f.id === preferences?.filter) ? preferences.filter : 'all';
+  const layoutMode = preferences?.layoutMode || 'grouped'; // 'grouped' | 'custom'
   const collapsed = new Set(Array.isArray(preferences?.collapsed) ? preferences.collapsed : []);
   // App owns these preferences and saves them in config.json, so unmounting
   // this view or restarting the portable app does not reset the queue tree.
-  const save = (next) => onPreferencesChange({ filter, collapsed: [...collapsed], ...next });
+  const save = (next) => onPreferencesChange({ filter, collapsed: [...collapsed], layoutMode, ...next });
   const controller = getController();
 
   const toggle = (id) => {
@@ -70,9 +74,28 @@ export default function QueueView({ onToast, preferences = {}, onPreferencesChan
     <>
       <header className="topbar">
         <h1>Downloads</h1>
+        {stats.total > 0 && (
+          <div className="view-mode-pills" role="group" aria-label="Queue layout mode">
+            <button
+              type="button"
+              className={`mode-pill${layoutMode === 'grouped' ? ' active' : ''}`}
+              onClick={() => save({ layoutMode: 'grouped' })}
+            >
+              Playlists
+            </button>
+            <button
+              type="button"
+              className={`mode-pill${layoutMode === 'custom' ? ' active' : ''}`}
+              onClick={() => save({ layoutMode: 'custom' })}
+            >
+              Queue Order
+              {(stats.queued + stats.active) > 0 && <span className="pill-badge">{stats.queued + stats.active}</span>}
+            </button>
+          </div>
+        )}
         <span className="spacer" />
         <div className="row-actions">
-          {FILTERS.map((f) => (
+          {FILTERS.filter((f) => !f.hideWhenZero || (stats.paused > 0 || filter === 'paused')).map((f) => (
             <button
               key={f.id}
               className={`btn btn-sm ${filter === f.id ? '' : 'btn-ghost'}`}
@@ -123,6 +146,8 @@ export default function QueueView({ onToast, preferences = {}, onPreferencesChan
         )}
         {!visible.length ? (
           <EmptyState filter={filter} total={stats.total} />
+        ) : layoutMode === 'custom' ? (
+          <CustomQueuePanel orderData={orderData} filter={filter} onToast={onToast} />
         ) : (
           visible.map((node) => (node.kind === 'profile' ? (
             <Profile
@@ -134,6 +159,7 @@ export default function QueueView({ onToast, preferences = {}, onPreferencesChan
               onToggleGroup={toggle}
               onRemoveGroup={removeGroup}
               onRemove={() => removeProfile(node)}
+              onToast={onToast}
             />
           ) : (
             <Group
@@ -142,6 +168,7 @@ export default function QueueView({ onToast, preferences = {}, onPreferencesChan
               collapsed={collapsed.has(node.group.id)}
               onToggle={() => toggle(node.group.id)}
               onRemove={() => removeGroup(node.group)}
+              onToast={onToast}
             />
           )))
         )}
@@ -150,18 +177,143 @@ export default function QueueView({ onToast, preferences = {}, onPreferencesChan
   );
 }
 
-/**
- * A whole profile: one row that stands for every playlist downloaded from one
- * person, with the playlists nested inside it and the tracks nested inside
- * those. Three levels rather than a flat list of forty sections, because a
- * profile download queues forty at once and the flat version buries everything
- * else the user has going on.
- *
- * The counts are summed over the profile's playlists rather than recomputed
- * from the records, so what the header claims and what the rows show cannot
- * drift apart while a filter is on.
- */
-function Profile({ node, collapsed, onToggle, isCollapsed, onToggleGroup, onRemoveGroup, onRemove }) {
+// Custom Queue View: shows exact pool execution order with drag-and-drop
+function CustomQueuePanel({ orderData, filter, onToast }) {
+  const c = getController();
+  const [dragFromId, setDragFromId] = useState(null);
+  const [dragTargetId, setDragTargetId] = useState(null);
+
+  const handleDragStart = useCallback((e, id) => {
+    setDragFromId(id);
+    try {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', id);
+    } catch { /* ignore */ }
+  }, []);
+
+  const handleDragOver = useCallback((e, id) => {
+    e.preventDefault();
+    if (id !== dragTargetId) setDragTargetId(id);
+  }, [dragTargetId]);
+
+  const handleDrop = useCallback((e, targetId) => {
+    e.preventDefault();
+    const fromId = dragFromId || (e.dataTransfer && e.dataTransfer.getData('text/plain'));
+    setDragFromId(null);
+    setDragTargetId(null);
+    if (fromId && targetId && fromId !== targetId) {
+      c.reorderItem?.(fromId, targetId);
+    }
+  }, [c, dragFromId]);
+
+  const activeList = orderData.active || [];
+  const queuedList = orderData.queued || [];
+  const pausedList = orderData.paused || [];
+  const restList = useMemo(() => {
+    const raw = orderData.rest || [];
+    if (filter === 'done') return raw.filter((i) => i.status === 'completed');
+    if (filter === 'missing') return raw.filter((i) => i.status === 'skipped');
+    return raw;
+  }, [orderData.rest, filter]);
+
+  const showActive = filter === 'all' || filter === 'active';
+  const showQueued = filter === 'all' || filter === 'active';
+  const showPaused = filter === 'all' || filter === 'paused' || filter === 'active';
+  const showRest = filter === 'all' || filter === 'done' || filter === 'missing';
+
+  return (
+    <div className="custom-queue-view">
+      {showActive && activeList.length > 0 && (
+        <section className="queue-stage-card active-stage">
+          <div className="stage-header">
+            <div className="stage-title">
+              <span className="pill accent live"><span className="dot" />Working</span>
+              <h2>Active ({activeList.length})</h2>
+            </div>
+            <span className="stage-hint">Hover a track to pause</span>
+          </div>
+          <div className="rows">
+            {activeList.map((rec, idx) => (
+              <TrackRow key={rec.id || rec.item.id} rec={rec} queueIndex={idx + 1} onToast={onToast} />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {showQueued && queuedList.length > 0 && (
+        <section className="queue-stage-card upnext-stage">
+          <div className="stage-header">
+            <div className="stage-title">
+              <span className="pill info">Up Next</span>
+              <h2>Queue ({queuedList.length})</h2>
+            </div>
+            <span className="stage-hint">Drag rows to reorder · ⚡ jumps to #1</span>
+          </div>
+          <div className="rows">
+            {queuedList.map((rec, idx) => (
+              <TrackRow
+                key={rec.id || rec.item.id}
+                rec={rec}
+                queueIndex={idx + 1}
+                draggableQueue
+                onDragStart={handleDragStart}
+                onDragOver={handleDragOver}
+                onDrop={handleDrop}
+                isDragTarget={dragTargetId === (rec.id || rec.item.id)}
+                onToast={onToast}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {showPaused && pausedList.length > 0 && (
+        <section className="queue-stage-card paused-stage">
+          <div className="stage-header">
+            <div className="stage-title">
+              <span className="pill paused-tone">Paused</span>
+              <h2>Paused ({pausedList.length})</h2>
+            </div>
+            <button
+              type="button"
+              className="btn btn-sm btn-ghost"
+              style={{ marginLeft: 'auto' }}
+              onClick={() => {
+                pausedList.forEach((rec) => c.resumeItem?.(rec.id || rec.item.id));
+                onToast?.(`Resumed ${pausedList.length} paused tracks.`);
+              }}
+            >
+              ▶ Resume all
+            </button>
+          </div>
+          <div className="rows">
+            {pausedList.map((rec) => (
+              <TrackRow key={rec.id || rec.item.id} rec={rec} onToast={onToast} />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {showRest && restList.length > 0 && (
+        <section className="queue-stage-card rest-stage">
+          <div className="stage-header">
+            <div className="stage-title">
+              <span className="pill">Finished</span>
+              <h2>Completed & Missing ({restList.length})</h2>
+            </div>
+          </div>
+          <div className="rows">
+            {restList.map((rec) => (
+              <TrackRow key={rec.id || rec.item.id} rec={rec} onToast={onToast} />
+            ))}
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
+function Profile({ node, collapsed, onToggle, isCollapsed, onToggleGroup, onRemoveGroup, onRemove, onToast }) {
   const [confirming, setConfirming] = useState(false);
   useEffect(() => {
     if (!confirming) return undefined;
@@ -169,10 +321,14 @@ function Profile({ node, collapsed, onToggle, isCollapsed, onToggleGroup, onRemo
     return () => clearTimeout(t);
   }, [confirming]);
 
+  const c = getController();
   const all = node.groups.flatMap((g) => g.allRecords);
   const done = all.filter((r) => r.status === 'completed').length;
   const missing = all.filter((r) => r.status === 'skipped').length;
-  const working = all.filter((r) => r.status === 'searching' || r.status === 'ready' || r.status === 'downloading').length;
+  const paused = all.filter((r) => r.status === 'paused').length;
+  const working = all.filter((r) => r.status === 'searching' || r.status === 'fetching' || r.status === 'ready' || r.status === 'downloading').length;
+  const hasPausable = all.some((r) => r.status === 'queued' || r.status === 'searching' || r.status === 'fetching' || r.status === 'ready' || r.status === 'downloading');
+  const hasResumable = paused > 0;
   const pct = all.length ? Math.round((done / all.length) * 100) : 0;
   const bodyId = `profile-body-${node.id}`;
 
@@ -189,6 +345,7 @@ function Profile({ node, collapsed, onToggle, isCollapsed, onToggleGroup, onRemo
             <div className="sub">
               {node.groups.length} {node.groups.length === 1 ? 'playlist' : 'playlists'}
               {' · '}{done} of {all.length} downloaded
+              {paused > 0 && ` · ${paused} paused`}
               {missing > 0 && ` · ${missing} missing`}
               {node.folderName && ` · ${node.folderName}/`}
             </div>
@@ -196,15 +353,37 @@ function Profile({ node, collapsed, onToggle, isCollapsed, onToggleGroup, onRemo
           {collapsed && working > 0 && <span className="pill accent live"><span className="dot" />{working}</span>}
           <span className={`pill ${pct === 100 ? 'ok' : ''}`}>{pct}%</span>
         </button>
-        {confirming ? (
-          <button className="btn btn-sm btn-danger group-remove" onClick={() => { setConfirming(false); onRemove(); }}>
-            Remove all {node.totalGroups} playlists?
-          </button>
-        ) : (
-          <button className="btn btn-sm btn-ghost btn-danger group-remove" onClick={() => setConfirming(true)}
-            title={`Remove everything queued from ${node.name}`}
-            aria-label={`Remove everything queued from ${node.name}`}>Remove profile</button>
-        )}
+        <div className="group-QuickActions">
+          {hasPausable && (
+            <button
+              className="btn btn-sm btn-ghost btn-icon"
+              title={`Pause ${node.name}`}
+              onClick={() => {
+                const n = c.pauseProfile?.(node.id);
+                if (n) onToast?.(`Paused ${n} tracks in ${node.name}.`);
+              }}
+            >❚❚</button>
+          )}
+          {hasResumable && (
+            <button
+              className="btn btn-sm btn-ghost btn-icon"
+              title={`Resume ${node.name}`}
+              onClick={() => {
+                const n = c.resumeProfile?.(node.id);
+                if (n) onToast?.(`Resumed ${n} tracks in ${node.name}.`);
+              }}
+            >▶</button>
+          )}
+          {confirming ? (
+            <button className="btn btn-sm btn-danger group-remove" onClick={() => { setConfirming(false); onRemove(); }}>
+              Remove all {node.totalGroups} playlists?
+            </button>
+          ) : (
+            <button className="btn btn-sm btn-ghost btn-danger group-remove" onClick={() => setConfirming(true)}
+              title={`Remove everything queued from ${node.name}`}
+              aria-label={`Remove everything queued from ${node.name}`}>Remove profile</button>
+          )}
+        </div>
       </div>
       {!collapsed && (
         <div className="profile-body" id={bodyId}>
@@ -215,6 +394,7 @@ function Profile({ node, collapsed, onToggle, isCollapsed, onToggleGroup, onRemo
               collapsed={isCollapsed(g.id)}
               onToggle={() => onToggleGroup(g.id)}
               onRemove={() => onRemoveGroup(g)}
+              onToast={onToast}
             />
           ))}
         </div>
@@ -223,7 +403,7 @@ function Profile({ node, collapsed, onToggle, isCollapsed, onToggleGroup, onRemo
   );
 }
 
-function Group({ group, collapsed, onToggle, onRemove }) {
+function Group({ group, collapsed, onToggle, onRemove, onToast }) {
   const [confirming, setConfirming] = useState(false);
   useEffect(() => {
     if (!confirming) return undefined;
@@ -231,69 +411,94 @@ function Group({ group, collapsed, onToggle, onRemove }) {
     return () => clearTimeout(t);
   }, [confirming]);
 
+  const c = getController();
   const done = group.allRecords.filter((r) => r.status === 'completed').length;
   const missing = group.allRecords.filter((r) => r.status === 'skipped').length;
-  const working = group.allRecords.filter((r) => r.status === 'searching' || r.status === 'ready' || r.status === 'downloading').length;
+  const paused = group.allRecords.filter((r) => r.status === 'paused').length;
+  const working = group.allRecords.filter((r) => r.status === 'searching' || r.status === 'fetching' || r.status === 'ready' || r.status === 'downloading').length;
+  const hasPausable = group.allRecords.some((r) => r.status === 'queued' || r.status === 'searching' || r.status === 'fetching' || r.status === 'ready' || r.status === 'downloading');
+  const hasResumable = paused > 0;
+  const hasQueued = group.allRecords.some((r) => r.status === 'queued' || r.status === 'paused');
   const pct = group.totalRecords ? Math.round((done / group.totalRecords) * 100) : 0;
   const sharePct = (n) => (group.totalRecords ? (n / group.totalRecords) * 100 : 0);
   const bodyId = `group-body-${group.id}`;
 
   return (
     <section className="group">
-      {/* The toggle is the whole header rather than the chevron alone: a 14px
-          target is a poor one for something the user hits constantly on a long
-          list. The remove button is a SIBLING of that button, not a child -
-          nesting one button inside another is invalid, and browsers resolve it
-          by dropping the inner one. */}
       <div className="group-head-row">
-      <button
-        className="group-head"
-        onClick={onToggle}
-        aria-expanded={!collapsed}
-        aria-controls={bodyId}
-      >
-        <span className={`chevron${collapsed ? ' collapsed' : ''}`} aria-hidden="true">▾</span>
-        {group.artwork
-          ? <img className="group-art" src={group.artwork} alt="" referrerPolicy="no-referrer" />
-          : <div className="group-art" aria-hidden="true" />}
-        <div className="group-meta">
-          <div className="name">{group.name}</div>
-          <div className="sub">
-            {done} of {group.totalRecords} downloaded
-            {group.records.length !== group.totalRecords && ` · showing ${group.records.length}`}
-            {missing > 0 && ` · ${missing} missing`}
-            {group.folderName && ` · ${group.folderName}`}
+        <button
+          className="group-head"
+          onClick={onToggle}
+          aria-expanded={!collapsed}
+          aria-controls={bodyId}
+        >
+          <span className={`chevron${collapsed ? ' collapsed' : ''}`} aria-hidden="true">▾</span>
+          {group.artwork
+            ? <img className="group-art" src={group.artwork} alt="" referrerPolicy="no-referrer" />
+            : <div className="group-art" aria-hidden="true" />}
+          <div className="group-meta">
+            <div className="name">{group.name}</div>
+            <div className="sub">
+              {done} of {group.totalRecords} downloaded
+              {group.records.length !== group.totalRecords && ` · showing ${group.records.length}`}
+              {paused > 0 && ` · ${paused} paused`}
+              {missing > 0 && ` · ${missing} missing`}
+              {group.folderName && ` · ${group.folderName}`}
+            </div>
           </div>
+          {collapsed && working > 0 && (
+            <span className="pill accent live"><span className="dot" />{working}</span>
+          )}
+          <span className={`pill ${pct === 100 ? 'ok' : ''}`}>{pct}%</span>
+        </button>
+
+        <div className="group-QuickActions">
+          {hasPausable && (
+            <button
+              className="btn btn-sm btn-ghost btn-icon"
+              title={`Pause “${group.name}”`}
+              onClick={() => {
+                const n = c.pauseGroup?.(group.id);
+                if (n) onToast?.(`Paused ${n} tracks in “${group.name}”.`);
+              }}
+            >❚❚</button>
+          )}
+          {hasResumable && (
+            <button
+              className="btn btn-sm btn-ghost btn-icon"
+              title={`Resume “${group.name}”`}
+              onClick={() => {
+                const n = c.resumeGroup?.(group.id);
+                if (n) onToast?.(`Resumed ${n} tracks in “${group.name}”.`);
+              }}
+            >▶</button>
+          )}
+          {hasQueued && group.id !== '__loose__' && (
+            <button
+              className="btn btn-sm btn-ghost btn-icon"
+              title={`Download “${group.name}” now`}
+              onClick={() => {
+                c.prioritizeGroup?.(group.id, { preempt: true });
+                onToast?.(`Prioritized “${group.name}”.`);
+              }}
+            >⚡</button>
+          )}
+          {confirming ? (
+            <button
+              className="btn btn-sm btn-danger group-remove"
+              onClick={() => { setConfirming(false); onRemove(); }}
+            >Remove playlist ({group.totalRecords})?</button>
+          ) : (
+            <button
+              className="btn btn-sm btn-ghost btn-danger group-remove"
+              onClick={() => setConfirming(true)}
+              title={`Remove “${group.name}” from the list`}
+              aria-label={`Remove ${group.name} from the list`}
+            >Remove playlist</button>
+          )}
         </div>
-        {/* Collapsed groups still have to show that something is happening
-            inside them, or the app looks idle while it is working. */}
-        {collapsed && working > 0 && (
-          <span className="pill accent live"><span className="dot" />{working}</span>
-        )}
-        <span className={`pill ${pct === 100 ? 'ok' : ''}`}>{pct}%</span>
-      </button>
-        {/* Two steps, because one click would otherwise throw away a queue that
-            took a hundred requests to build - and undo does not exist here. The
-            armed state expires on its own so it cannot be left primed. */}
-        {confirming ? (
-          <button
-            className="btn btn-sm btn-danger group-remove"
-            onClick={() => { setConfirming(false); onRemove(); }}
-          >Remove playlist ({group.totalRecords})?</button>
-        ) : (
-          <button
-            className="btn btn-sm btn-ghost btn-danger group-remove"
-            onClick={() => setConfirming(true)}
-            title={`Remove “${group.name}” from the list`}
-            aria-label={`Remove ${group.name} from the list`}
-          >Remove playlist</button>
-        )}
       </div>
-      {/* One bar per playlist, segmented rather than single-valued: done,
-          working and missing are three different facts about the same list,
-          and a bar that only shows "done" makes a stalled playlist and a
-          working one look identical. Aligned with the header text, not
-          full-bleed - it belongs to the header, it is not a divider. */}
+
       <div className="group-bar" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}
            aria-label={`${group.name}: ${pct}% downloaded`}>
         <span className="seg done" style={{ width: `${sharePct(done)}%` }} />
@@ -302,7 +507,7 @@ function Group({ group, collapsed, onToggle, onRemove }) {
       </div>
       {!collapsed && (
         <div className="rows" id={bodyId}>
-          {group.records.map((rec) => <TrackRow key={rec.id || rec.item.id} rec={rec} />)}
+          {group.records.map((rec) => <TrackRow key={rec.id || rec.item.id} rec={rec} onToast={onToast} />)}
         </div>
       )}
     </section>
@@ -315,7 +520,7 @@ function EmptyState({ filter, total }) {
       <div className="empty">
         <div className="big">♪</div>
         <h3>Nothing queued yet</h3>
-        <p>Paste a Spotify, Deezer or Lucida link under <strong>Add music</strong>, or search for a track or album.</p>
+        <p>Paste a Spotify, Deezer or Lucida link under <strong>Add music</strong>, or search for a track, album, or artist.</p>
       </div>
     );
   }

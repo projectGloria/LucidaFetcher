@@ -1943,7 +1943,10 @@ function handleWillDownload(event, item, webContents) {
     // sanitises what it suggests, but yt-download already checks its own target
     // for containment and this path did not - so it is checked the same way here
     // rather than left as the one place that trusts it.
-    const fileName = safeBaseName(item.getFilename());
+    const rawName = safeBaseName(item.getFilename());
+    const fileName = (ctx?.artist && ctx?.title && /\.flac$/i.test(rawName))
+      ? safeBaseName(`${ctx.artist} - ${ctx.title}.flac`)
+      : rawName;
     const service = ctx && (ctx.attemptService || ctx.service);
     const blockedUrl = (item.getURLChain?.() || [item.getURL()]).some(url => {
       try { return MEDIA_HOSTS.test(new URL(url).hostname); } catch { return false; }

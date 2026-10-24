@@ -26,6 +26,7 @@ const UNAVAILABLE_OUTCOMES = new Set([
 ]);
 
 export const QUEUED = 'queued';
+export const PAUSED = 'paused';
 export const SEARCHING = 'searching';
 // Fetched, handed off, and not yet moving bytes. A scraper site gives you no
 // parked link you can hold - "the page finished preparing the file" and "the
@@ -193,6 +194,8 @@ export class Controller {
           },
           status: track.status,
           statusText: track.statusText,
+          priority: !!track.priority,
+          prioritizedAt: track.prioritizedAt || null,
           get progress() { return track.progress; },
           get receivedBytes() { return track.receivedBytes; },
           get totalBytes() { return track.totalBytes; },
@@ -234,6 +237,8 @@ export class Controller {
         },
         status: track.status,
         statusText: track.statusText,
+        priority: !!track.priority,
+        prioritizedAt: track.prioritizedAt || null,
         get progress() { return track.progress; },
         get receivedBytes() { return track.receivedBytes; },
         get totalBytes() { return track.totalBytes; },
@@ -252,6 +257,57 @@ export class Controller {
   getItem(id) { return this._getRecord(id); }
 
   /**
+   * Returns the live execution queue order:
+   * 1. Active items (downloading, ready, searching)
+   * 2. Queued items in exact Pool.queue execution order (with 1-based queuePosition)
+   * 3. Paused items
+   * 4. Skipped / Cancelled / Completed items
+   */
+  getQueueOrder() {
+    const unique = new Map();
+    for (const rec of this.items.values()) unique.set(rec.item.id, rec);
+    for (const [key, rec] of this.tracks.entries()) unique.set(key, rec);
+
+    const active = [];
+    const paused = [];
+    const rest = [];
+    const queuedById = new Map();
+
+    for (const [id, rec] of unique.entries()) {
+      if (rec.status === DOWNLOADING || rec.status === READY || rec.status === SEARCHING) {
+        active.push(rec);
+      } else if (rec.status === QUEUED) {
+        queuedById.set(id, rec);
+      } else if (rec.status === PAUSED) {
+        paused.push(rec);
+      } else {
+        rest.push(rec);
+      }
+    }
+
+    const orderedQueued = [];
+    const seenQueued = new Set();
+    for (const it of this.pool.queue) {
+      const rec = queuedById.get(it.id);
+      if (rec && !seenQueued.has(it.id)) {
+        seenQueued.add(it.id);
+        orderedQueued.push(rec);
+      }
+    }
+    for (const [id, rec] of queuedById.entries()) {
+      if (!seenQueued.has(id)) orderedQueued.push(rec);
+    }
+
+    return {
+      active,
+      queued: orderedQueued,
+      paused,
+      rest,
+      all: [...active, ...orderedQueued, ...paused, ...rest],
+    };
+  }
+
+  /**
    * The byte-level channel: download progress, and nothing else.
    *
    * A transfer reports bytes far more often than any track changes status, and
@@ -262,16 +318,18 @@ export class Controller {
   getProgressSnapshot() { return this._progressVersion; }
 
   get stats() {
-    let queued = 0, active = 0, ready = 0, completed = 0, skipped = 0;
+    let queued = 0, active = 0, ready = 0, completed = 0, skipped = 0, paused = 0, cancelled = 0;
     const allRecords = [...this.items.values(), ...this.tracks.values()];
     for (const r of allRecords) {
       if (r.status === COMPLETED) completed++;
       else if (r.status === SKIPPED) skipped++;
+      else if (r.status === PAUSED) paused++;
+      else if (r.status === CANCELLED) cancelled++;
       else if (r.status === READY) { ready++; active++; }
       else if (r.status === SEARCHING || r.status === DOWNLOADING) active++;
       else if (r.status === QUEUED) queued++;
     }
-    return { queued, active, ready, completed, skipped, total: allRecords.length };
+    return { queued, active, ready, completed, skipped, paused, cancelled, total: allRecords.length };
   }
 
   _emit() {
@@ -362,8 +420,11 @@ export class Controller {
     this._progressListeners.clear();
   }
 
-  add(items) {
+  add(items, opts = {}) {
     const list = Array.isArray(items) ? items : [items];
+    const priority = !!opts.priority;
+    const preempt = !!opts.preempt;
+    const startPaused = !!opts.paused;
     const fresh = [];
     let duplicates = 0;
     for (const item of list) {
@@ -378,6 +439,9 @@ export class Controller {
         if (this.items.has(firstId)) {
           duplicates++;
           this.log('duplicate', { id: item.id, name: item.name, key, firstId });
+          if (priority) {
+            this.prioritize(firstId, { preempt });
+          }
           continue;
         }
         this.keys.delete(key); // the original was removed; this entry takes over
@@ -386,14 +450,36 @@ export class Controller {
       item.searchVariants = item.searchVariants && item.searchVariants.length
         ? item.searchVariants
         : buildSearchVariants(item.title, item.artist, item.album);
-      this.items.set(item.id, {
-        item, status: QUEUED, statusText: 'Waiting in queue',
+      const rec = {
+        item,
+        status: startPaused ? PAUSED : QUEUED,
+        statusText: startPaused ? 'Paused — ready when you are' : (priority ? 'Prioritized — starting next' : 'Waiting in queue'),
+        priority,
+        prioritizedAt: priority ? Date.now() : null,
         tried: [], plan: null, step: null, result: null,
-      });
+      };
+      if (priority && this.items.size > 0) {
+        const entries = [[item.id, rec], ...this.items.entries()];
+        this.items = new Map(entries);
+      } else {
+        this.items.set(item.id, rec);
+      }
       fresh.push(item);
     }
     this.lastAdd = { added: fresh.length, duplicates };
-    if (fresh.length) { this._retryStopped = false; this._retryRound = 0; this._emit(); this.pool.submit(fresh); }
+    if (fresh.length) {
+      this._retryStopped = false;
+      this._retryRound = 0;
+      this._emit();
+      if (!startPaused) {
+        if (priority) {
+          this.pool.submitFront(fresh);
+          if (preempt) this._preemptSlots(Math.min(fresh.length, this.pool.concurrency), new Set(fresh.map((i) => i.id)));
+        } else {
+          this.pool.submit(fresh);
+        }
+      }
+    }
     return fresh.length;
   }
 
@@ -484,8 +570,8 @@ export class Controller {
       const rec = {
         item,
         transferService: meta.transferService || meta.downloadService || null,
-        status: isDownloaded ? COMPLETED : [SKIPPED, CANCELLED].includes(meta.status) ? meta.status : QUEUED,
-        statusText: isDownloaded ? 'Downloaded' : meta.statusText || 'Waiting in queue',
+        status: isDownloaded ? COMPLETED : [SKIPPED, CANCELLED, PAUSED].includes(meta.status) ? meta.status : QUEUED,
+        statusText: isDownloaded ? 'Downloaded' : meta.status === PAUSED ? (meta.statusText || 'Paused') : meta.statusText || 'Waiting in queue',
         tried: meta.tried || [],
         plan: null,
         step: null,
@@ -558,8 +644,12 @@ export class Controller {
       // Given up on already (failTransfer), or no longer ours.
       if (rec.transferToken !== ctl) { this._emit(); return; }
       rec.transferToken = null;
-      if (this._getRecord(item.id) !== rec || rec.status === CANCELLED) { this._emit(); return; }
-      if (ctl.signal.aborted) { this._set(rec, CANCELLED, 'Cancelled'); return; }
+      if (this._getRecord(item.id) !== rec || rec.status === CANCELLED || rec.status === PAUSED) { this._emit(); return; }
+      if (ctl.signal.aborted) {
+        if (rec.status !== PAUSED && !rec._preempted) this._set(rec, CANCELLED, 'Cancelled');
+        rec._preempted = false;
+        return;
+      }
 
       if (done && done.status === 'completed') {
         rec.result = { outcome: 'completed', savePath: done.savePath, file: done.file, bytes: done.bytes, service: done.service };
@@ -585,9 +675,383 @@ export class Controller {
   setConcurrency(n) { this.pool.setConcurrency(n); this._emit(); }
   setServices(services) { this.services = [...services]; this._emit(); }
 
+  /**
+   * Preempt up to `count` currently running non-priority slots so newly prioritized
+   * items can begin immediately without waiting for slow searches to finish.
+   */
+  _preemptSlots(count = 1, excludeIds = new Set()) {
+    if (count <= 0 || this.pool._freeSlots.length > 0) return 0;
+    const activeRuns = [...this.pool.active.values()].reverse();
+    let preempted = 0;
+    for (const run of activeRuns) {
+      if (preempted >= count) break;
+      if (excludeIds.has(run.item.id)) continue;
+      const victimRec = this._getRecord(run.item.id);
+      if (!victimRec) continue;
+      victimRec._preempted = true;
+      if (victimRec.step && victimRec.step.index != null) {
+        victimRec.resumeIndex = victimRec.step.index;
+      }
+      victimRec.status = QUEUED;
+      victimRec.statusText = 'Yielded slot to priority download — will resume next';
+      // Place victim in queue right after the excluded priority items
+      this.pool.queue = this.pool.queue.filter((it) => it.id !== run.item.id);
+      let insertAt = 0;
+      while (insertAt < this.pool.queue.length && excludeIds.has(this.pool.queue[insertAt].id)) {
+        insertAt++;
+      }
+      this.pool.queue.splice(insertAt, 0, run.item);
+      try { run.controller.abort(); } catch (e) { /* already settled */ }
+      preempted++;
+    }
+    if (preempted) this._emit();
+    return preempted;
+  }
+
+  /**
+   * Casually pause a single item (whether queued, searching, ready, or downloading).
+   * Frees its worker slot and transfer slot immediately so other items can proceed,
+   * while remembering its place in the fallback chain for when it is resumed.
+   */
+  pauseItem(id) {
+    const rec = this._getRecord(id);
+    if (!rec || rec.status === COMPLETED || rec.status === PAUSED) return false;
+    const targetId = rec.item.id;
+    if (rec.step && rec.step.index != null) {
+      rec.resumeIndex = rec.step.index;
+    }
+    rec._preempted = false;
+    rec.status = PAUSED;
+    rec.statusText = 'Paused';
+    this.pool.cancel(targetId);
+    this._abortTransfer(targetId);
+    this._emit();
+    return true;
+  }
+
+  /**
+   * Resume or restart any paused, cancelled, skipped, or queued item.
+   * If `now` is true, places it at the front of the queue and optionally preempts a busy slot.
+   */
+  resumeItem(id, { now = false, preempt = false } = {}) {
+    const rec = this._getRecord(id);
+    if (!rec || rec.status === COMPLETED) return false;
+    const targetId = rec.item.id;
+    if (rec.status === SKIPPED || rec.status === CANCELLED) {
+      rec.retried = false;
+      rec.tried = [];
+      rec.plan = null;
+      rec.step = null;
+      rec.result = null;
+      rec.resumeIndex = null;
+      rec.progress = null;
+      rec.receivedBytes = 0;
+      rec.totalBytes = 0;
+      rec.transferService = null;
+      rec.attemptStartedAt = null;
+      this.unhealthy.clear();
+      this._unhealthyAt.clear();
+    }
+    rec._preempted = false;
+    if (now) {
+      rec.priority = true;
+      rec.prioritizedAt = Date.now();
+    }
+    const alreadyActive = this.pool.active.has(targetId) || this.transfers.has(targetId);
+    if (!alreadyActive) {
+      rec.status = QUEUED;
+      rec.statusText = now ? 'Prioritized — starting next' : 'Waiting in queue';
+      if (now) {
+        this.pool.submitFront([rec.item]);
+        if (preempt) this._preemptSlots(1, new Set([targetId]));
+      } else {
+        this.pool.submit([rec.item]);
+      }
+    }
+    this._retryStopped = false;
+    this._emit();
+    return true;
+  }
+
+  /**
+   * Toggle an item between active/queued and paused/resumed.
+   */
+  toggleItem(id, opts = {}) {
+    const rec = this._getRecord(id);
+    if (!rec || rec.status === COMPLETED) return false;
+    if (rec.status === PAUSED || rec.status === CANCELLED || rec.status === SKIPPED) {
+      return this.resumeItem(id, opts);
+    }
+    return this.pauseItem(id);
+  }
+
+  /**
+   * Prioritize an item ("Download Now" / "Move to Top").
+   * Preempts a busy worker slot by default so the item starts immediately.
+   */
+  prioritize(id, { preempt = true } = {}) {
+    const rec = this._getRecord(id);
+    if (!rec || rec.status === COMPLETED) return false;
+    const targetId = rec.item.id;
+    rec.priority = true;
+    rec.prioritizedAt = Date.now();
+
+    // Also move visual position to top of its container
+    this._moveVisualOrder(id, 'top');
+
+    if (rec.status === PAUSED || rec.status === CANCELLED || rec.status === SKIPPED) {
+      return this.resumeItem(id, { now: true, preempt });
+    }
+    if (rec.status === QUEUED) {
+      rec.statusText = 'Prioritized — starting next';
+      this.pool.submitFront([rec.item]);
+      if (preempt) this._preemptSlots(1, new Set([targetId]));
+      this._emit();
+      return true;
+    }
+    this._emit();
+    return true;
+  }
+
+  downloadNow(id) {
+    return this.prioritize(id, { preempt: true });
+  }
+
+  _moveVisualOrder(id, target) {
+    if (typeof id === 'string' && id.includes('::')) {
+      const parts = id.split('::');
+      const plId = parts[0];
+      const key = parts[parts.length - 1];
+      const pl = this.playlists.get(plId);
+      if (pl && Array.isArray(pl.trackKeys)) {
+        const idx = pl.trackKeys.indexOf(key);
+        if (idx >= 0) {
+          let nextIdx = idx;
+          if (target === 'top' || target === 'front') nextIdx = 0;
+          else if (target === 'bottom' || target === 'back') nextIdx = pl.trackKeys.length - 1;
+          else if (target === 'up') nextIdx = Math.max(0, idx - 1);
+          else if (target === 'down') nextIdx = Math.min(pl.trackKeys.length - 1, idx + 1);
+          if (nextIdx !== idx) {
+            const [k] = pl.trackKeys.splice(idx, 1);
+            pl.trackKeys.splice(nextIdx, 0, k);
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+    const rec = this._getRecord(id);
+    const itemId = rec?.item?.id || id;
+    if (this.items.has(itemId)) {
+      const entries = [...this.items.entries()];
+      const idx = entries.findIndex(([k]) => k === itemId);
+      if (idx < 0) return false;
+      let nextIdx = idx;
+      if (target === 'top' || target === 'front') nextIdx = 0;
+      else if (target === 'bottom' || target === 'back') nextIdx = entries.length - 1;
+      else if (target === 'up') nextIdx = Math.max(0, idx - 1);
+      else if (target === 'down') nextIdx = Math.min(entries.length - 1, idx + 1);
+      if (nextIdx === idx) return false;
+      const [entry] = entries.splice(idx, 1);
+      entries.splice(nextIdx, 0, entry);
+      this.items = new Map(entries);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Move an item in the queue ('top' | 'up' | 'down' | 'bottom').
+   */
+  moveItem(id, direction = 'top') {
+    const rec = this._getRecord(id);
+    if (!rec) return false;
+    const targetId = rec.item.id;
+    const movedPool = this.pool.move(targetId, direction);
+    const movedVisual = this._moveVisualOrder(id, direction);
+    if (direction === 'top' || direction === 'front') {
+      rec.priority = true;
+      rec.prioritizedAt = Date.now();
+    }
+    if (movedPool || movedVisual) {
+      this._emit();
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Reorder `fromId` to the position of `toId` (drag-and-drop support).
+   */
+  reorderItem(fromId, toId) {
+    const fromRec = this._getRecord(fromId);
+    const toRec = this._getRecord(toId);
+    if (!fromRec || !toRec || fromRec === toRec) return false;
+    const fromTarget = fromRec.item.id;
+    const toTarget = toRec.item.id;
+    let changed = this.pool.reorder(fromTarget, toTarget);
+
+    if (this.items.has(fromTarget) && this.items.has(toTarget)) {
+      const entries = [...this.items.entries()];
+      const fIdx = entries.findIndex(([k]) => k === fromTarget);
+      const tIdx = entries.findIndex(([k]) => k === toTarget);
+      if (fIdx >= 0 && tIdx >= 0 && fIdx !== tIdx) {
+        const [entry] = entries.splice(fIdx, 1);
+        entries.splice(tIdx, 0, entry);
+        this.items = new Map(entries);
+        changed = true;
+      }
+    } else if (typeof fromId === 'string' && fromId.includes('::') && typeof toId === 'string' && toId.includes('::')) {
+      const fParts = fromId.split('::');
+      const tParts = toId.split('::');
+      if (fParts[0] === tParts[0]) {
+        const pl = this.playlists.get(fParts[0]);
+        if (pl && Array.isArray(pl.trackKeys)) {
+          const fKey = fParts[fParts.length - 1];
+          const tKey = tParts[tParts.length - 1];
+          const fIdx = pl.trackKeys.indexOf(fKey);
+          const tIdx = pl.trackKeys.indexOf(tKey);
+          if (fIdx >= 0 && tIdx >= 0 && fIdx !== tIdx) {
+            const [k] = pl.trackKeys.splice(fIdx, 1);
+            pl.trackKeys.splice(tIdx, 0, k);
+            changed = true;
+          }
+        }
+      }
+    }
+    if (changed) this._emit();
+    return changed;
+  }
+
+  _groupRecords(groupId) {
+    if (this.playlists.has(groupId)) {
+      const pl = this.playlists.get(groupId);
+      return (pl?.trackKeys || []).map((k) => this.tracks.get(k)).filter(Boolean);
+    }
+    const out = [];
+    for (const rec of this.items.values()) {
+      const gid = rec.item.groupId || '__loose__';
+      if (gid === groupId) out.push(rec);
+    }
+    return out;
+  }
+
+  /** Pause all active and queued tracks in a playlist/group. */
+  pauseGroup(groupId) {
+    const recs = this._groupRecords(groupId);
+    let count = 0;
+    for (const rec of recs) {
+      if (rec.status === QUEUED || rec.status === SEARCHING || rec.status === READY || rec.status === DOWNLOADING) {
+        const targetId = rec.item.id;
+        if (rec.step && rec.step.index != null) rec.resumeIndex = rec.step.index;
+        rec._preempted = false;
+        rec.status = PAUSED;
+        rec.statusText = 'Paused';
+        this.pool.cancel(targetId);
+        this._abortTransfer(targetId);
+        count++;
+      }
+    }
+    if (count) this._emit();
+    return count;
+  }
+
+  /** Resume all paused (or cancelled/skipped) tracks in a playlist/group. */
+  resumeGroup(groupId, { now = false, preempt = false } = {}) {
+    const recs = this._groupRecords(groupId);
+    const hasPaused = recs.some((r) => r.status === PAUSED);
+    const toResume = [];
+    for (const rec of recs) {
+      if (rec.status === PAUSED || (!hasPaused && (rec.status === CANCELLED || rec.status === SKIPPED))) {
+        if (rec.status === SKIPPED || rec.status === CANCELLED) {
+          rec.retried = false;
+          rec.tried = [];
+          rec.plan = null;
+          rec.step = null;
+          rec.result = null;
+          rec.resumeIndex = null;
+          rec.progress = null;
+          rec.receivedBytes = 0;
+          rec.totalBytes = 0;
+          rec.transferService = null;
+          rec.attemptStartedAt = null;
+        }
+        rec._preempted = false;
+        rec.status = QUEUED;
+        rec.statusText = now ? 'Prioritized — starting next' : 'Waiting in queue';
+        if (now) {
+          rec.priority = true;
+          rec.prioritizedAt = Date.now();
+        }
+        toResume.push(rec.item);
+      }
+    }
+    if (toResume.length) {
+      this._retryStopped = false;
+      if (now) {
+        this.pool.submitFront(toResume);
+        if (preempt) this._preemptSlots(Math.min(toResume.length, this.pool.concurrency), new Set(toResume.map((i) => i.id)));
+      } else {
+        this.pool.submit(toResume);
+      }
+      this._emit();
+    }
+    return toResume.length;
+  }
+
+  /** Prioritize an entire playlist/group to the front of the queue. */
+  prioritizeGroup(groupId, { preempt = true } = {}) {
+    const recs = this._groupRecords(groupId);
+    const items = [];
+    for (const rec of recs) {
+      if (rec.status === COMPLETED) continue;
+      if (rec.status === PAUSED || rec.status === CANCELLED || rec.status === SKIPPED) {
+        if (rec.status !== PAUSED) {
+          rec.tried = [];
+          rec.plan = null;
+          rec.step = null;
+          rec.result = null;
+          rec.resumeIndex = null;
+        }
+        rec.status = QUEUED;
+      }
+      if (rec.status === QUEUED) {
+        rec.priority = true;
+        rec.prioritizedAt = Date.now();
+        rec.statusText = 'Prioritized — starting next';
+        items.push(rec.item);
+      }
+    }
+    if (items.length) {
+      this.pool.submitFront(items);
+      if (preempt) this._preemptSlots(Math.min(items.length, this.pool.concurrency), new Set(items.map((i) => i.id)));
+      this._emit();
+    }
+    return items.length;
+  }
+
+  /** Pause all playlists in a profile. */
+  pauseProfile(profileId) {
+    let count = 0;
+    for (const [plId, pl] of this.playlists.entries()) {
+      if (pl.profileId === profileId) count += this.pauseGroup(plId);
+    }
+    return count;
+  }
+
+  /** Resume all playlists in a profile. */
+  resumeProfile(profileId, opts = {}) {
+    let count = 0;
+    for (const [plId, pl] of this.playlists.entries()) {
+      if (pl.profileId === profileId) count += this.resumeGroup(plId, opts);
+    }
+    return count;
+  }
+
   cancel(id) {
     const rec = this._getRecord(id);
     const targetId = rec?.item?.id || id;
+    if (rec) rec._preempted = false;
     this.pool.cancel(targetId);
     this._abortTransfer(targetId);
     if (rec && !this._isTerminal(rec.status)) this._set(rec, CANCELLED, 'Cancelled');
@@ -601,6 +1065,7 @@ export class Controller {
     const allRecords = [...this.items.values(), ...this.tracks.values()];
     for (const rec of allRecords) {
       if (!this._isTerminal(rec.status)) {
+        rec._preempted = false;
         this._abortTransfer(rec.item.id);
         rec.status = CANCELLED;
         rec.statusText = 'Cancelled';
@@ -910,8 +1375,12 @@ export class Controller {
       if (rec.transferToken !== ctl) { this._emit(); return; }
       rec.transferToken = null;
       // Removed, cancelled or otherwise no longer ours while the bytes moved.
-      if (this._getRecord(item.id) !== rec || rec.status === CANCELLED) { this._emit(); return; }
-      if (ctl.signal.aborted) { this._set(rec, CANCELLED, 'Cancelled'); return; }
+      if (this._getRecord(item.id) !== rec || rec.status === CANCELLED || rec.status === PAUSED) { this._emit(); return; }
+      if (ctl.signal.aborted) {
+        if (rec.status !== PAUSED && !rec._preempted) this._set(rec, CANCELLED, 'Cancelled');
+        rec._preempted = false;
+        return;
+      }
 
       const res = transferResult(done);
       rec.tried.push({
@@ -988,7 +1457,7 @@ export class Controller {
 
   async _runChain(item, slot, signal) {
     const rec = this._getRecord(item.id);
-    if (!rec || rec.status === CANCELLED) return;
+    if (!rec || rec.status === CANCELLED || rec.status === PAUSED) return;
 
     const services = [...new Set(this.services)];
 
@@ -1017,7 +1486,11 @@ export class Controller {
   async _walkChain(rec, item, slot, signal, startIndex) {
     let index = startIndex;
     for (;;) {
-      if (signal && signal.aborted) { this._set(rec, CANCELLED, 'Cancelled'); return; }
+      if (signal && signal.aborted) {
+        if (rec._preempted) { rec._preempted = false; return; }
+        if (rec.status !== PAUSED) this._set(rec, CANCELLED, 'Cancelled');
+        return;
+      }
 
       const step = nextAttempt(rec.plan, { index, skip: this._skipSet() });
       if (!step) {
@@ -1048,12 +1521,17 @@ export class Controller {
       try {
         res = await this.getWorker(slot).run(item, step, signal);
       } catch (err) {
-        if (err && err.name === 'Aborted') { this._set(rec, CANCELLED, 'Cancelled'); return; }
+        if (err && err.name === 'Aborted') {
+          if (rec._preempted) { rec._preempted = false; return; }
+          if (rec.status !== PAUSED) this._set(rec, CANCELLED, 'Cancelled');
+          return;
+        }
         res = { outcome: 'error', message: err && err.message };
       }
 
       if (signal?.aborted || this._getRecord(item.id) !== rec) {
-        if (this._getRecord(item.id) === rec) this._set(rec, CANCELLED, 'Cancelled');
+        if (rec._preempted) { rec._preempted = false; return; }
+        if (this._getRecord(item.id) === rec && rec.status !== PAUSED) this._set(rec, CANCELLED, 'Cancelled');
         return;
       }
 
@@ -1075,7 +1553,8 @@ export class Controller {
         if (waiting.detached) return;
         const done = waiting.done;
         if (signal?.aborted || this._getRecord(item.id) !== rec) {
-          if (this._getRecord(item.id) === rec) this._set(rec, CANCELLED, 'Cancelled');
+          if (rec._preempted) { rec._preempted = false; return; }
+          if (this._getRecord(item.id) === rec && rec.status !== PAUSED) this._set(rec, CANCELLED, 'Cancelled');
           return;
         }
         res = transferResult(done);

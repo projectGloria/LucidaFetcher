@@ -162,7 +162,15 @@ export function useTransferProgress() {
 export function useStats() {
   const store = controller;
   const version = useEngineVersion();
-  return useMemo(() => store ? store.stats : { queued: 0, active: 0, completed: 0, skipped: 0, total: 0 }, [store, version]);
+  return useMemo(() => store ? store.stats : { queued: 0, active: 0, completed: 0, skipped: 0, paused: 0, cancelled: 0, total: 0 }, [store, version]);
+}
+
+export function useQueueOrder() {
+  const store = controller;
+  const version = useEngineVersion();
+  return useMemo(() => (store && typeof store.getQueueOrder === 'function')
+    ? store.getQueueOrder()
+    : { active: [], queued: [], paused: [], rest: [], all: [] }, [store, version]);
 }
 
 export function usePaused() {

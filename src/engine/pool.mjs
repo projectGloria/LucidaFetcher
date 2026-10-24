@@ -59,15 +59,63 @@ export class Pool {
 
   submit(items) {
     const list = Array.isArray(items) ? items : [items];
-    for (const item of list) this.queue.push(item);
+    const existing = new Set(this.queue.map((it) => it.id));
+    for (const item of list) {
+      if (!existing.has(item.id)) {
+        this.queue.push(item);
+        existing.add(item.id);
+      }
+    }
+    this._pump();
+  }
+
+  /** Put items at the FRONT of the queue in their given order. */
+  submitFront(items) {
+    const list = Array.isArray(items) ? items : [items];
+    if (!list.length) return;
+    const ids = new Set(list.map((it) => it.id));
+    this.queue = this.queue.filter((it) => !ids.has(it.id));
+    this.queue.unshift(...list);
     this._pump();
   }
 
   /** Put an item back at the FRONT - used when an attempt fails and the track
    *  should carry on down its chain before anything new is started. */
   requeueFront(item) {
+    this.queue = this.queue.filter((it) => it.id !== item.id);
     this.queue.unshift(item);
     this._pump();
+  }
+
+  /**
+   * Move a queued item to 'top' | 'bottom' | 'up' | 'down' or a numeric index.
+   */
+  move(id, target) {
+    const idx = this.queue.findIndex((it) => it.id === id);
+    if (idx < 0) return false;
+    let nextIdx = idx;
+    if (target === 'top' || target === 'front') nextIdx = 0;
+    else if (target === 'bottom' || target === 'back') nextIdx = this.queue.length - 1;
+    else if (target === 'up') nextIdx = Math.max(0, idx - 1);
+    else if (target === 'down') nextIdx = Math.min(this.queue.length - 1, idx + 1);
+    else if (typeof target === 'number') nextIdx = Math.max(0, Math.min(this.queue.length - 1, target | 0));
+    if (nextIdx === idx) return false;
+    const [item] = this.queue.splice(idx, 1);
+    this.queue.splice(nextIdx, 0, item);
+    return true;
+  }
+
+  /**
+   * Move queued item `fromId` to the position of `toId`.
+   */
+  reorder(fromId, toId) {
+    if (!fromId || !toId || fromId === toId) return false;
+    const fromIdx = this.queue.findIndex((it) => it.id === fromId);
+    const toIdx = this.queue.findIndex((it) => it.id === toId);
+    if (fromIdx < 0 || toIdx < 0) return false;
+    const [item] = this.queue.splice(fromIdx, 1);
+    this.queue.splice(toIdx, 0, item);
+    return true;
   }
 
   pause() { this.paused = true; }

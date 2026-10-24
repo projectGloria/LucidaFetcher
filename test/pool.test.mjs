@@ -183,3 +183,20 @@ test('a slot retired by shrinking is not reused until it is back under the ceili
   await pool.onIdle();
   assert.ok(slots.every((s) => s < 2), `slot above the ceiling was used: ${slots}`);
 });
+
+
+test('submitFront and move/reorder allow custom queue ordering', async () => {
+  const order = [];
+  const pool = new Pool({
+    concurrency: 1,
+    run: async (item) => { order.push(item.id); await tick(2); },
+  });
+  pool.pause();
+  pool.submit(items(4)); // t0, t1, t2, t3
+  pool.submitFront({ id: 'urgent' }); // urgent, t0, t1, t2, t3
+  pool.move('t3', 'up'); // urgent, t0, t1, t3, t2
+  pool.reorder('t2', 't0'); // urgent, t2, t0, t1, t3
+  pool.resume();
+  await pool.onIdle();
+  assert.deepEqual(order, ['urgent', 't2', 't0', 't1', 't3']);
+});

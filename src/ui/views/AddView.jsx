@@ -14,11 +14,18 @@ const MODES = [
   { id: 'profile', label: 'Spotify profile', icon: '◎' },
   { id: 'history', label: 'History', icon: '⟲' },
 ];
+const SEARCH_FILTERS = [
+  { id: 'all', label: 'All' },
+  { id: 'tracks', label: 'Songs' },
+  { id: 'albums', label: 'Albums' },
+  { id: 'artists', label: 'Artists' },
+];
 const DEMO_RESULTS = [
-  { id: 'demo-1', title: 'After Dark', artist: 'Mr.Kitty', album: 'Time', durationSec: 259, source: 'flac', image: 'https://e-cdns-images.dzcdn.net/images/cover/b41a5fc5372ae6014e7a4627d758c5be/500x500-000000-80-0-0.jpg' },
-  { id: 'demo-2', title: 'Random Access Memories', artist: 'Daft Punk', isSet: true, deezerAlbumId: '6575789', trackCount: 13, source: 'flac', image: 'https://e-cdns-images.dzcdn.net/images/cover/311bba0fc112d15f72c8b5a65f0456c1/500x500-000000-80-0-0.jpg' },
-  { id: 'demo-3', title: 'Get Lucky (feat. Pharrell Williams & Nile Rodgers)', artist: 'Daft Punk', album: 'Random Access Memories', durationSec: 369, source: 'flac', image: 'https://e-cdns-images.dzcdn.net/images/cover/311bba0fc112d15f72c8b5a65f0456c1/500x500-000000-80-0-0.jpg' },
-  { id: 'demo-4', title: 'Instant Crush (feat. Julian Casablancas)', artist: 'Daft Punk', album: 'Random Access Memories', durationSec: 337, source: 'flac', image: 'https://e-cdns-images.dzcdn.net/images/cover/311bba0fc112d15f72c8b5a65f0456c1/500x500-000000-80-0-0.jpg' },
+  { id: 'demo-artist-1', artistId: '27', name: 'Daft Punk', title: 'Daft Punk', isArtist: true, albumCount: 14, fanCount: 4820000, image: 'https://e-cdns-images.dzcdn.net/images/artist/f2bc007e9133c946ac3c3907ddc5d2ea/500x500-000000-80-0-0.jpg' },
+  { id: 'demo-2', title: 'Random Access Memories', artist: 'Daft Punk', artistId: '27', isSet: true, deezerAlbumId: '6575789', trackCount: 13, source: 'flac', image: 'https://e-cdns-images.dzcdn.net/images/cover/311bba0fc112d15f72c8b5a65f0456c1/500x500-000000-80-0-0.jpg' },
+  { id: 'demo-1', title: 'After Dark', artist: 'Mr.Kitty', artistId: '412', album: 'Time', albumId: '90123', durationSec: 259, source: 'flac', image: 'https://e-cdns-images.dzcdn.net/images/cover/b41a5fc5372ae6014e7a4627d758c5be/500x500-000000-80-0-0.jpg' },
+  { id: 'demo-3', title: 'Get Lucky (feat. Pharrell Williams & Nile Rodgers)', artist: 'Daft Punk', artistId: '27', album: 'Random Access Memories', albumId: '6575789', durationSec: 369, source: 'flac', image: 'https://e-cdns-images.dzcdn.net/images/cover/311bba0fc112d15f72c8b5a65f0456c1/500x500-000000-80-0-0.jpg' },
+  { id: 'demo-4', title: 'Instant Crush (feat. Julian Casablancas)', artist: 'Daft Punk', artistId: '27', album: 'Random Access Memories', albumId: '6575789', durationSec: 337, source: 'flac', image: 'https://e-cdns-images.dzcdn.net/images/cover/311bba0fc112d15f72c8b5a65f0456c1/500x500-000000-80-0-0.jpg' },
 ];
 
 function toQueueItem({ title, artist, album, image, folderName, group, mediaUrl, durationSec, profile, service, originalService, trackId, isrc, artworkPending }) {
@@ -104,42 +111,135 @@ async function withoutExisting(items) {
 }
 
 function EmptyArtwork({ kind = 'track' }) {
-  return <div className="media-placeholder" aria-hidden="true">{kind === 'playlist' ? '♫' : '♪'}</div>;
+  return <div className="media-placeholder" aria-hidden="true">{kind === 'playlist' ? '♫' : kind === 'artist' ? '◎' : '♪'}</div>;
 }
 
-function SourceBadge({ isSet }) {
-  if (isSet) return <span className="source-badge album">FLAC · Album</span>;
-  return <span className="source-badge flac">FLAC</span>;
+function ArtistCard({ artist, onOpen, disabled }) {
+  const art = artworkFor(artist);
+  return (
+    <button
+      type="button"
+      className="artist-card"
+      onClick={() => onOpen(artist)}
+      disabled={disabled}
+    >
+      <div className="artist-card-avatar">
+        {art ? <img src={art} alt="" loading="lazy" /> : <EmptyArtwork kind="artist" />}
+      </div>
+      <div className="artist-card-info">
+        <h3 title={artist.name || artist.title}>{artist.name || artist.title}</h3>
+        <p>
+          Artist
+          {artist.albumCount ? ` · ${artist.albumCount} albums` : ''}
+        </p>
+      </div>
+    </button>
+  );
 }
 
-function TrackCard({ result, action, actionLabel = 'Add to queue', queued = false, disabled = false, onOpen }) {
+function TrackCard({ result, action, onDownloadNow, actionLabel = 'Queue', queued = false, disabled = false, onOpen, onArtistClick, onAlbumClick }) {
   const art = artworkFor(result);
   const length = formatDuration(result.durationSec);
   const isSet = !!result.isSet && !!onOpen;
-  const cover = (
-    <div className="media-cover">
-      {art ? <img src={art} alt="" loading="lazy" /> : <EmptyArtwork kind={isSet ? 'playlist' : 'track'} />}
-      {length && <span className="duration">{length}</span>}
-      {isSet && <span className="set-badge">{result.trackCount ? `${result.trackCount} tracks` : 'Album'}</span>}
-      <SourceBadge isSet={isSet} />
-    </div>
-  );
+  const artistName = result.artist || result.uploader || 'Unknown artist';
+
   return (
-    <article className={`media-card${isSet ? ' is-set' : ''}`}>
-      {isSet
-        ? <button type="button" className="cover-button" onClick={onOpen} disabled={disabled} aria-label={`Open ${result.title}`}>{cover}</button>
-        : cover}
+    <article className={`media-card${isSet ? ' is-set' : ''}${queued ? ' is-queued' : ''}`}>
+      <div
+        className="media-cover"
+        onClick={isSet ? onOpen : undefined}
+        style={isSet ? { cursor: 'pointer' } : undefined}
+      >
+        {art ? <img src={art} alt="" loading="lazy" /> : <EmptyArtwork kind={isSet ? 'playlist' : 'track'} />}
+        {length && <span className="duration">{length}</span>}
+        {isSet && (
+          <span className="set-badge">
+            {result.recordType && result.recordType !== 'album' ? `${result.recordType.toUpperCase()} · ` : ''}
+            {result.trackCount ? `${result.trackCount} tracks` : 'Album'}
+          </span>
+        )}
+        {queued && <span className="queued-badge">✓ Queued</span>}
+
+        <div className="cover-hover-actions" onClick={(e) => e.stopPropagation()}>
+          {isSet ? (
+            <>
+              <button type="button" className="hover-btn primary" onClick={onOpen} disabled={disabled}>
+                View Album
+              </button>
+              <button type="button" className="hover-btn icon-only" onClick={action} disabled={disabled} title="Queue entire album">
+                ＋
+              </button>
+              {onDownloadNow && (
+                <button type="button" className="hover-btn icon-only priority" onClick={onDownloadNow} disabled={disabled} title="Download album now">
+                  ⚡
+                </button>
+              )}
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                className={`hover-btn primary${queued ? ' done' : ''}`}
+                onClick={action}
+                disabled={disabled || queued}
+              >
+                {queued ? '✓ Queued' : `＋ ${actionLabel}`}
+              </button>
+              {onDownloadNow && !queued && (
+                <button
+                  type="button"
+                  className="hover-btn icon-only priority"
+                  onClick={onDownloadNow}
+                  disabled={disabled}
+                  title="Download immediately (jumps to front of queue)"
+                >
+                  ⚡
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+
       <div className="media-details">
-        <h3 title={result.title}>{result.title}</h3>
-        <p title={result.artist || result.uploader}>{result.artist || result.uploader || 'Unknown artist'}{result.album ? ` · ${result.album}` : ''}</p>
-        {isSet
-          ? <div className="card-actions">
-              <button className="btn card-action" onClick={onOpen} disabled={disabled}>⤢ Open</button>
-              <button className="btn card-action primary-ghost" onClick={action} disabled={disabled}>＋ Add all</button>
-            </div>
-          : <button className={`btn card-action${queued ? ' queued' : ''}`} onClick={action} disabled={disabled || queued}>
-              {queued ? '✓ Queued' : `＋ ${actionLabel}`}
-            </button>}
+        <h3
+          title={result.title}
+          onClick={isSet ? onOpen : undefined}
+          style={isSet ? { cursor: 'pointer' } : undefined}
+        >
+          {result.title}
+        </h3>
+        <p className="media-sub">
+          {onArtistClick && (result.artistId || result.artist) ? (
+            <button
+              type="button"
+              className="meta-link"
+              onClick={() => onArtistClick({ id: result.artistId, name: artistName })}
+              title={`View artist ${artistName}`}
+            >
+              {artistName}
+            </button>
+          ) : (
+            <span title={artistName}>{artistName}</span>
+          )}
+          {result.album && !isSet && (
+            <>
+              <span> · </span>
+              {onAlbumClick && result.albumId ? (
+                <button
+                  type="button"
+                  className="meta-link"
+                  onClick={() => onAlbumClick({ id: result.albumId, deezerAlbumId: result.albumId, title: result.album, artist: artistName, image: art, isSet: true })}
+                  title={`Open album ${result.album}`}
+                >
+                  {result.album}
+                </button>
+              ) : (
+                <span title={result.album}>{result.album}</span>
+              )}
+            </>
+          )}
+        </p>
       </div>
     </article>
   );
@@ -147,8 +247,9 @@ function TrackCard({ result, action, actionLabel = 'Add to queue', queued = fals
 
 /** A set inside a set - a /albums link lists albums, not tracks - opened in
  *  place so the user can see what is in one before queueing any of it. */
-function SetModal({ state, onClose, onQueueAll, onQueueOne, busy }) {
+function SetModal({ state, onClose, onQueueAll, onDownloadAllNow, onQueueOne, onDownloadOneNow, onOpenArtist, busy }) {
   const rows = state.preview?.results || [];
+  const artistName = state.artist || rows[0]?.texts?.[1] || '';
   return (
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
       <div className="modal" role="dialog" aria-modal="true" aria-label={state.title} onClick={(e) => e.stopPropagation()}>
@@ -158,25 +259,60 @@ function SetModal({ state, onClose, onQueueAll, onQueueOne, busy }) {
               ? <img src={state.preview?.group?.artworkUrl || state.image} alt="" />
               : <EmptyArtwork kind="playlist" />}
             <div>
-              <span className="eyebrow">{state.loading ? 'Reading…' : 'FLAC Album'}</span>
+              <span className="eyebrow">{state.loading ? 'Reading…' : 'Album'}</span>
               <h2>{state.preview?.name || state.title}</h2>
-              {!state.loading && !state.error && <p>{rows.length} tracks</p>}
+              {!state.loading && !state.error && (
+                <p>
+                  {artistName && (
+                    onOpenArtist ? (
+                      <button type="button" className="meta-link" onClick={() => { onClose(); onOpenArtist({ name: artistName }); }}>
+                        {artistName}
+                      </button>
+                    ) : artistName
+                  )}
+                  {artistName ? ' · ' : ''}{rows.length} tracks
+                </p>
+              )}
             </div>
           </div>
           <div className="modal-actions">
-            {!state.loading && !state.error && !!rows.length &&
-              <button className="btn btn-primary" onClick={onQueueAll} disabled={!!busy}>＋ Add all {rows.length}</button>}
-            <button className="btn" onClick={onClose} aria-label="Close">✕</button>
+            {!state.loading && !state.error && !!rows.length && (
+              <>
+                <button className="btn btn-primary" onClick={onQueueAll} disabled={!!busy}>＋ Queue all {rows.length}</button>
+                {onDownloadAllNow && (
+                  <button className="btn btn-icon" onClick={onDownloadAllNow} disabled={!!busy} title="Download album immediately">⚡</button>
+                )}
+              </>
+            )}
+            <button className="btn btn-ghost" onClick={onClose} aria-label="Close">✕</button>
           </div>
         </header>
         <div className="modal-body">
           {state.loading && <div className="media-grid skeleton-grid">{Array.from({ length: 6 }, (_, i) => <div className="media-card skeleton" key={i} />)}</div>}
           {state.error && <div className="inline-empty"><strong>Could not open that album</strong><span>{state.error}</span></div>}
-          {!state.loading && !state.error && <div className="media-grid">{rows.map((r, i) => (
-            <TrackCard key={`${r.texts[0]}-${i}`} actionLabel="Add track" disabled={!!busy}
-              result={{ title: r.texts[0], artist: r.texts[1] || '', album: r.album || state.title, image: r.image, durationSec: r.durationSec, source: 'flac' }}
-              action={() => onQueueOne(r)} />
-          ))}</div>}
+          {!state.loading && !state.error && (
+            <div className="album-track-list">
+              {rows.map((r, i) => {
+                const dur = formatDuration(r.durationSec);
+                return (
+                  <div className="album-track-row" key={`${r.texts[0]}-${i}`}>
+                    <span className="album-track-num">{i + 1}</span>
+                    <div className="album-track-main">
+                      <div className="album-track-title">{r.texts[0]}</div>
+                      <div className="album-track-artist">{r.texts[1] || artistName}</div>
+                    </div>
+                    {dur && <span className="album-track-dur">{dur}</span>}
+                    <div className="album-track-actions">
+                      <button type="button" className="btn btn-sm" onClick={() => onQueueOne(r)} disabled={!!busy} title="Add track to queue">＋ Queue</button>
+                      {onDownloadOneNow && (
+                        <button type="button" className="btn btn-sm btn-icon" onClick={() => onDownloadOneNow(r)} disabled={!!busy} title="Download now">⚡</button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -230,8 +366,8 @@ function HistoryEntry({ entry, onOpen, onForget, busy }) {
         </p>
       </div>
       <div className="history-actions">
-        <button className="btn" onClick={onOpen} disabled={!!busy}>Open again</button>
-        <button className="btn subtle" onClick={onForget} aria-label="Remove from history">✕</button>
+        <button className="btn btn-sm" onClick={onOpen} disabled={!!busy}>Open</button>
+        <button className="btn btn-sm subtle" onClick={onForget} aria-label="Remove from history">✕</button>
       </div>
     </article>
   );
@@ -239,6 +375,7 @@ function HistoryEntry({ entry, onOpen, onForget, busy }) {
 
 export default function AddView({ onToast }) {
   const [mode, setMode] = useState('search');
+  const [searchFilter, setSearchFilter] = useState('all'); // 'all' | 'tracks' | 'albums' | 'artists'
   const [query, setQuery] = useState('');
   const [link, setLink] = useState('');
   const [profileName, setProfileName] = useState('');
@@ -246,6 +383,7 @@ export default function AddView({ onToast }) {
   const [busy, setBusy] = useState(null);
   const [results, setResults] = useState([]);
   const [searchState, setSearchState] = useState('idle');
+  const [artistView, setArtistView] = useState(null); // { id, name, image, fanCount, albumCount, albums, topTracks, loading, error }
   const [preview, setPreview] = useState(null);
   const [profile, setProfile] = useState(null);
   const [order, setOrder] = useState('default');
@@ -255,13 +393,13 @@ export default function AddView({ onToast }) {
   const entries = history.list();
   const recentProfiles = entries.filter(entry => entry.kind === 'profile');
 
-  const resultKey = (r) => (r.isSet ? 'album:' : 'track:') + (r.id || r.url || `${r.title}|${r.artist || r.uploader}`);
+  const resultKey = (r) => (r.isArtist ? 'artist:' : r.isSet ? 'album:' : 'track:') + (r.id || r.url || `${r.title}|${r.artist || r.uploader}`);
   const safeFolder = folder.trim() ? sanitizeFolder(folder.trim()) : null;
 
-  const queueItems = async (items, label, quiet = false) => {
+  const queueItems = async (items, label, quiet = false, explicitOpts = {}) => {
     const { items: keep, skipped, guessed } = await withoutExisting(items);
     const controller = getController();
-    const n = controller.add(keep);
+    const n = controller.add(keep, explicitOpts);
     const dupes = (controller.lastAdd && controller.lastAdd.duplicates) || 0;
     // Worth saying out loud: a playlist that lists a track twice looks like the
     // app lost tracks unless the collapse is reported.
@@ -272,11 +410,13 @@ export default function AddView({ onToast }) {
       ? ` ${guessed} matched a similarly named file already in the folder.`
       : '';
     if (quiet) return n;
+    const verb = explicitOpts.priority ? 'Prioritized' : 'Added';
+    const dest = explicitOpts.priority ? 'at the top of the queue' : 'to the queue';
     if (n === 1) {
       const item = keep[0];
-      onToast(`Added “${item.title}”${item.artist ? ` by ${item.artist}` : ''} to the queue.${dupeNote}${guessNote}`);
+      onToast(`${verb} “${item.title}”${item.artist ? ` by ${item.artist}` : ''} ${dest}.${dupeNote}${guessNote}`);
     } else if (n > 1) {
-      onToast(`Added ${n} tracks${label ? ` from ${label}` : ''} to the queue.${dupeNote}${guessNote}`);
+      onToast(`${verb} ${n} tracks${label ? ` from ${label}` : ''} ${dest}.${dupeNote}${guessNote}`);
     }
     else if (dupes) onToast(`Already queued.${dupeNote}`);
     else if (skipped) onToast(`${skipped === 1 ? 'That track is' : 'Those tracks are'} already downloaded.${guessNote}`);
@@ -288,29 +428,44 @@ export default function AddView({ onToast }) {
     event.preventDefault();
     const q = query.trim();
     if (!q || busy) return;
-    setBusy('Searching FLAC tracks and albums…');
+    setBusy('Searching tracks, albums, and artists…');
     setSearchState('loading');
+    setArtistView(null);
     setResults([]);
     setQueued(new Set());
     try {
       if (!isElectron) {
-        await new Promise((resolve) => setTimeout(resolve, 350));
-        setResults(DEMO_RESULTS.map((r, i) => ({ ...r, title: i ? r.title : q })));
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        setResults(DEMO_RESULTS);
         setSearchState('done');
         return;
       }
-      const [tracksRes, albumsRes] = await Promise.all([
-        ipc.invoke('http-json', `https://api.deezer.com/search?q=${encodeURIComponent(q)}&limit=15`),
-        ipc.invoke('http-json', `https://api.deezer.com/search/album?q=${encodeURIComponent(q)}&limit=6`),
+      const [tracksRes, albumsRes, artistsRes] = await Promise.all([
+        ipc.invoke('http-json', `https://api.deezer.com/search?q=${encodeURIComponent(q)}&limit=24`).catch(() => null),
+        ipc.invoke('http-json', `https://api.deezer.com/search/album?q=${encodeURIComponent(q)}&limit=18`).catch(() => null),
+        ipc.invoke('http-json', `https://api.deezer.com/search/artist?q=${encodeURIComponent(q)}&limit=12`).catch(() => null),
       ]);
+
+      const artists = ((artistsRes && artistsRes.data) || []).map((ar) => ({
+        id: String(ar.id),
+        artistId: String(ar.id),
+        name: ar.name,
+        title: ar.name,
+        image: ar.picture_xl || ar.picture_big || ar.picture_medium || ar.picture || '',
+        albumCount: ar.nb_album || 0,
+        fanCount: ar.nb_fan || 0,
+        isArtist: true,
+      }));
 
       const albums = ((albumsRes && albumsRes.data) || []).map((a) => ({
         id: String(a.id),
         deezerAlbumId: String(a.id),
         title: a.title,
         artist: a.artist?.name || '',
+        artistId: a.artist?.id ? String(a.artist.id) : null,
         image: a.cover_xl || a.cover_big || a.cover_medium || a.cover || '',
         isSet: true,
+        recordType: a.record_type || 'album',
         trackCount: a.nb_tracks || 0,
         source: 'flac',
       }));
@@ -322,23 +477,25 @@ export default function AddView({ onToast }) {
         isrc: t.isrc,
         title: t.title,
         artist: t.artist?.name || '',
+        artistId: t.artist?.id ? String(t.artist.id) : null,
         album: t.album?.title || '',
+        albumId: t.album?.id ? String(t.album.id) : null,
         image: t.album?.cover_xl || t.album?.cover_big || t.album?.cover_medium || t.album?.cover || '',
         durationSec: t.duration || null,
         isSet: false,
         source: 'flac',
       }));
 
-      const combined = [...albums, ...tracks];
+      const combined = [...artists, ...albums, ...tracks];
       setResults(combined);
       setSearchState('done');
       if (combined.length) {
         history.remember({
           kind: 'search', label: q, name: q, count: combined.length,
-          image: combined[0]?.image || '', results: combined, folder: safeFolder
+          image: (tracks[0] || albums[0] || artists[0])?.image || '', results: combined, folder: safeFolder
         });
       }
-      if (!combined.length && (!tracksRes || !albumsRes)) {
+      if (!combined.length && (!tracksRes && !albumsRes && !artistsRes)) {
         onToast('Search provider is unavailable right now. Try again in a moment.', 'err');
       }
     } catch (error) {
@@ -347,9 +504,102 @@ export default function AddView({ onToast }) {
     } finally { setBusy(null); }
   };
 
-  const addSearchResult = async (result) => {
+  const openArtist = async (target) => {
+    if (!target || busy) return;
+    setArtistView({
+      id: target.id || target.artistId || null,
+      name: target.name || target.title || 'Artist',
+      image: target.image || '',
+      loading: true,
+      albums: [],
+      topTracks: [],
+    });
+    try {
+      if (!isElectron) {
+        await new Promise((r) => setTimeout(r, 200));
+        setArtistView({
+          id: '27',
+          name: target.name || 'Daft Punk',
+          image: DEMO_RESULTS[0].image,
+          albumCount: 14,
+          loading: false,
+          albums: DEMO_RESULTS.filter((r) => r.isSet),
+          topTracks: DEMO_RESULTS.filter((r) => !r.isSet && !r.isArtist),
+        });
+        return;
+      }
+      const initialId = target.id || target.artistId;
+      let artistMeta = null;
+      if (!initialId && target.name) {
+        const searchRes = await ipc.invoke('http-json', `https://api.deezer.com/search/artist?q=${encodeURIComponent(target.name)}&limit=5`);
+        const match = (searchRes?.data || []).find((a) => a.name.toLowerCase() === target.name.toLowerCase()) || searchRes?.data?.[0];
+        if (match) {
+          artistMeta = match;
+        }
+      }
+      const artistId = initialId || (artistMeta ? String(artistMeta.id) : null);
+      if (!artistId) {
+        setArtistView((prev) => ({ ...prev, loading: false, error: 'Could not find artist discography.' }));
+        return;
+      }
+
+      const [infoRes, albumsRes, topRes] = await Promise.all([
+        artistMeta ? Promise.resolve(artistMeta) : ipc.invoke('http-json', `https://api.deezer.com/artist/${artistId}`).catch(() => null),
+        ipc.invoke('http-json', `https://api.deezer.com/artist/${artistId}/albums?limit=50`).catch(() => null),
+        ipc.invoke('http-json', `https://api.deezer.com/artist/${artistId}/top?limit=15`).catch(() => null),
+      ]);
+
+      const artistName = infoRes?.name || target.name || 'Artist';
+      const artistImage = infoRes?.picture_xl || infoRes?.picture_big || infoRes?.picture_medium || target.image || '';
+
+      const albums = ((albumsRes && albumsRes.data) || []).map((a) => ({
+        id: String(a.id),
+        deezerAlbumId: String(a.id),
+        title: a.title,
+        artist: artistName,
+        artistId: String(artistId),
+        image: a.cover_xl || a.cover_big || a.cover_medium || a.cover || '',
+        isSet: true,
+        recordType: a.record_type || 'album',
+        trackCount: a.nb_tracks || 0,
+        releaseDate: a.release_date || '',
+        source: 'flac',
+      }));
+
+      const topTracks = ((topRes && topRes.data) || []).map((t) => ({
+        id: String(t.id),
+        service: 'deezer',
+        trackId: String(t.id),
+        isrc: t.isrc,
+        title: t.title,
+        artist: t.artist?.name || artistName,
+        artistId: String(artistId),
+        album: t.album?.title || '',
+        albumId: t.album?.id ? String(t.album.id) : null,
+        image: t.album?.cover_xl || t.album?.cover_big || t.album?.cover_medium || t.album?.cover || artistImage,
+        durationSec: t.duration || null,
+        isSet: false,
+        source: 'flac',
+      }));
+
+      setArtistView({
+        id: String(artistId),
+        name: artistName,
+        image: artistImage,
+        albumCount: infoRes?.nb_album || albums.length,
+        fanCount: infoRes?.nb_fan || 0,
+        loading: false,
+        albums,
+        topTracks,
+      });
+    } catch (error) {
+      setArtistView((prev) => ({ ...prev, loading: false, error: error.message || 'Could not load artist.' }));
+    }
+  };
+
+  const addSearchResult = async (result, explicitOpts = {}) => {
     if (result.isSet) {
-      await queueSet(result);
+      await queueSet(result, explicitOpts);
       setQueued((prev) => new Set(prev).add(resultKey(result)));
       return;
     }
@@ -362,7 +612,7 @@ export default function AddView({ onToast }) {
       folderName: safeFolder,
       durationSec: result.durationSec,
     });
-    if (await queueItems([item], null)) setQueued((prev) => new Set(prev).add(resultKey(result)));
+    if (await queueItems([item], null, false, explicitOpts)) setQueued((prev) => new Set(prev).add(resultKey(result)));
   };
 
   const importLink = async (event) => {
@@ -383,7 +633,7 @@ export default function AddView({ onToast }) {
 
   // Rows that are themselves albums cannot be queued as tracks - they hold N of
   // them - so "Add all" takes the real tracks and says what it left behind.
-  const queuePreview = async () => {
+  const queuePreview = async (explicitOpts = {}) => {
     const sets = preview.results.filter((r) => r.isSet);
     const tracks = preview.results.filter((r) => !r.isSet);
     if (!tracks.length) {
@@ -394,7 +644,7 @@ export default function AddView({ onToast }) {
       ...r,
       title: r.texts[0], artist: r.texts[1] || '', album: r.album, image: r.image,
       folderName: preview.group.folderName, group: preview.group, mediaUrl: r.mediaUrl, durationSec: r.durationSec,
-    })), preview.name);
+    })), preview.name, false, explicitOpts);
     if (sets.length) onToast(`${sets.length} album${sets.length > 1 ? 's were' : ' was'} skipped — open one to add its tracks.`);
   };
 
@@ -624,7 +874,7 @@ export default function AddView({ onToast }) {
   // One playlist off a profile grid. It still lands under the user's folder:
   // adding two of someone's playlists by hand and then downloading the profile
   // should not scatter the same music across two different places.
-  const queuePlaylist = async (playlist) => {
+  const queuePlaylist = async (playlist, explicitOpts = {}) => {
     setBusy(`Reading “${playlist.name}”…`);
     try {
       const out = await readPlaylist(playlist, true);
@@ -643,7 +893,7 @@ export default function AddView({ onToast }) {
         ...r,
         title: r.texts[0], artist: r.texts[1] || '', image: r.image,
         folderName: group.folderName, group, profile: meta,
-      })), out.name);
+      })), out.name, false, explicitOpts);
     } catch (error) { onToast(error.message || 'Could not read that playlist.', 'err'); }
     finally { setBusy(null); }
   };
@@ -662,6 +912,7 @@ export default function AddView({ onToast }) {
     }
     if (entry.kind === 'search') {
       setMode('search');
+      setArtistView(null);
       setQuery(entry.label);
       setResults(entry.results || []);
       setQueued(new Set());
@@ -682,7 +933,7 @@ export default function AddView({ onToast }) {
 
   const openSet = async (row) => {
     if (!row.mediaUrl && !row.deezerAlbumId && !row.id) return;
-    setSetModal({ title: row.title, image: row.image, loading: true });
+    setSetModal({ title: row.title, artist: row.artist, image: row.image, loading: true });
     try {
       let out;
       if (row.deezerAlbumId || (row.isSet && row.id)) {
@@ -691,20 +942,20 @@ export default function AddView({ onToast }) {
       } else {
         out = await sources.resolve(row.mediaUrl, { mode: 'auto', perTrackArtwork: true });
       }
-      if (out.error) { setSetModal({ title: row.title, image: row.image, error: out.error }); return; }
-      setSetModal({ title: row.title, image: row.image, preview: out });
+      if (out.error) { setSetModal({ title: row.title, artist: row.artist, image: row.image, error: out.error }); return; }
+      setSetModal({ title: row.title, artist: row.artist, image: row.image, preview: out });
       if (row.mediaUrl) {
         history.remember({ kind: 'link', label: row.mediaUrl, name: out.name, count: out.results.length,
                    image: out.group?.artworkUrl || row.image || '' });
       }
     } catch (error) {
-      setSetModal({ title: row.title, image: row.image, error: error.message || 'Could not read that album.' });
+      setSetModal({ title: row.title, artist: row.artist, image: row.image, error: error.message || 'Could not read that album.' });
     }
   };
 
   // An album card can go straight to the queue: the resolve behind it is the
   // same cached one the pop-up uses, so this costs a request only the first time.
-  const queueSet = async (row) => {
+  const queueSet = async (row, explicitOpts = {}) => {
     if (!row.mediaUrl && !row.deezerAlbumId && !row.id) return;
     setBusy(`Reading “${row.title}”…`);
     try {
@@ -726,7 +977,7 @@ export default function AddView({ onToast }) {
         folderName: out.group?.folderName, group: out.group,
         album: out.name || row.title,
         durationSec: r.durationSec,
-      })), out.name);
+      })), out.name, false, explicitOpts);
     } catch (error) { onToast(error.message || 'Could not read that album.', 'err'); }
     finally { setBusy(null); }
   };
@@ -753,10 +1004,14 @@ export default function AddView({ onToast }) {
     trackCount: r.trackCount || null,
   })) || [], [preview]);
 
+  const artistResults = useMemo(() => results.filter((r) => r.isArtist), [results]);
+  const albumResults = useMemo(() => results.filter((r) => r.isSet && !r.isArtist), [results]);
+  const trackResults = useMemo(() => results.filter((r) => !r.isSet && !r.isArtist), [results]);
+
   return (
     <>
       <header className="topbar add-topbar">
-        <div><h1>Add music</h1><span className="topbar-subtitle">Find lossless recordings and albums before queueing</span></div>
+        <div><h1>Add music</h1><span className="topbar-subtitle">Search songs, albums, and artists in lossless FLAC</span></div>
         {busy && <><span className="spacer" /><span className="pill accent live"><span className="dot" />{busy}</span></>}
       </header>
 
@@ -764,17 +1019,34 @@ export default function AddView({ onToast }) {
         <div className="add-hero">
           <div className="mode-tabs" role="tablist" aria-label="Add music method">
             {MODES.map((item) => <button key={item.id} role="tab" aria-selected={mode === item.id}
-              className="mode-tab" disabled={!!busy} onClick={() => setMode(item.id)}><span aria-hidden="true">{item.icon}</span>{item.label}</button>)}
+              className="mode-tab" disabled={!!busy} onClick={() => { setMode(item.id); setArtistView(null); }}><span aria-hidden="true">{item.icon}</span>{item.label}</button>)}
           </div>
 
           {mode === 'search' && <form className="discovery-form" onSubmit={search}>
-            <label htmlFor="track-search">Search song or album for lossless FLAC download</label>
+            <label htmlFor="track-search">Search by song, album, or artist</label>
             <div className="search-control"><span className="search-icon" aria-hidden="true">⌕</span>
-              <input id="track-search" className="input" autoFocus placeholder="Try “Daft Punk — Random Access Memories” or “After Dark”" value={query} onChange={(e) => setQuery(e.target.value)} />
-              {query && <button type="button" className="clear-input" aria-label="Clear search" onClick={() => { setQuery(''); setResults([]); setSearchState('idle'); }}>×</button>}
+              <input id="track-search" className="input" autoFocus placeholder="Search artist, album, or song (e.g. Apashe, Requiem, Daft Punk)…" value={query} onChange={(e) => setQuery(e.target.value)} />
+              {query && <button type="button" className="clear-input" aria-label="Clear search" onClick={() => { setQuery(''); setResults([]); setSearchState('idle'); setArtistView(null); }}>×</button>}
               <button className="btn btn-primary search-button" disabled={!query.trim() || !!busy}>{searchState === 'loading' ? 'Searching…' : 'Search'}</button>
             </div>
-            <div className="form-foot"><span>Lossless FLAC results (songs & albums)</span><label className="folder-inline">Save to folder<input className="input" placeholder="Optional" value={folder} onChange={(e) => setFolder(e.target.value)} /></label></div>
+            <div className="form-foot">
+              <div className="search-filter-pills" role="group" aria-label="Search category">
+                {SEARCH_FILTERS.map((f) => (
+                  <button
+                    key={f.id}
+                    type="button"
+                    className={`filter-chip${searchFilter === f.id ? ' active' : ''}`}
+                    onClick={() => { setSearchFilter(f.id); setArtistView(null); }}
+                  >
+                    {f.label}
+                    {searchState === 'done' && f.id === 'tracks' && trackResults.length > 0 && <span>{trackResults.length}</span>}
+                    {searchState === 'done' && f.id === 'albums' && albumResults.length > 0 && <span>{albumResults.length}</span>}
+                    {searchState === 'done' && f.id === 'artists' && artistResults.length > 0 && <span>{artistResults.length}</span>}
+                  </button>
+                ))}
+              </div>
+              <label className="folder-inline">Save to folder<input className="input" placeholder="Optional" value={folder} onChange={(e) => setFolder(e.target.value)} /></label>
+            </div>
           </form>}
 
           {mode === 'link' && <form className="discovery-form" onSubmit={importLink}>
@@ -814,19 +1086,211 @@ export default function AddView({ onToast }) {
           </form>}
         </div>
 
-        {mode === 'search' && searchState === 'idle' && <div className="discovery-empty"><div className="empty-orbit"><span>♪</span></div><h2>Lossless FLAC search.</h2><p>Find songs and complete albums in FLAC quality, review metadata, and queue directly.</p></div>}
+        {/* Artist Discography View */}
+        {mode === 'search' && artistView && (
+          <section className="results-section artist-discography">
+            <div className="artist-hero-bar">
+              <button type="button" className="btn btn-sm btn-ghost" onClick={() => setArtistView(null)}>
+                ← Back to search
+              </button>
+              <div className="artist-hero-identity">
+                {artistView.image ? <img src={artistView.image} alt="" className="artist-hero-avatar" /> : <div className="artist-hero-avatar placeholder">◎</div>}
+                <div>
+                  <span className="eyebrow">Artist Discography</span>
+                  <h2>{artistView.name}</h2>
+                  {!artistView.loading && (
+                    <p>{artistView.albums?.length || 0} releases · {artistView.topTracks?.length || 0} top tracks</p>
+                  )}
+                </div>
+              </div>
+              {!artistView.loading && artistView.topTracks?.length > 0 && (
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  disabled={!!busy}
+                  onClick={() => queueItems(
+                    artistView.topTracks.map((t) => toQueueItem({ ...t, folderName: safeFolder || sanitizeFolder(artistView.name) })),
+                    `${artistView.name} Top Tracks`
+                  )}
+                >
+                  ＋ Queue Top {artistView.topTracks.length} Tracks
+                </button>
+              )}
+            </div>
 
-        {mode === 'search' && searchState === 'loading' && <section className="results-section" aria-busy="true"><div className="results-heading"><div><span className="eyebrow">Searching</span><h2>Finding matching recordings…</h2></div></div><div className="media-grid skeleton-grid">{Array.from({ length: 8 }, (_, i) => <div className="media-card skeleton" key={i} />)}</div></section>}
+            {artistView.loading && (
+              <div className="media-grid skeleton-grid">{Array.from({ length: 6 }, (_, i) => <div className="media-card skeleton" key={i} />)}</div>
+            )}
+            {artistView.error && (
+              <div className="inline-empty"><strong>Could not load artist</strong><span>{artistView.error}</span></div>
+            )}
+            {!artistView.loading && !artistView.error && (
+              <>
+                {artistView.albums?.length > 0 && (
+                  <div className="result-block">
+                    <div className="block-head">
+                      <h3>Albums & Releases</h3>
+                      <span>{artistView.albums.length} releases</span>
+                    </div>
+                    <div className="media-grid">
+                      {artistView.albums.map((album) => (
+                        <TrackCard
+                          key={resultKey(album)}
+                          result={album}
+                          queued={queued.has(resultKey(album))}
+                          disabled={!!busy}
+                          onOpen={() => openSet(album)}
+                          action={() => addSearchResult(album)}
+                          onDownloadNow={() => addSearchResult(album, { priority: true, preempt: true })}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
 
-        {mode === 'search' && searchState === 'done' && <section className="results-section">
-          <div className="results-heading"><div><span className="eyebrow">Search results</span><h2>{results.length ? `${results.length} FLAC recordings for “${query.trim()}”` : 'No recordings found'}</h2></div>{!!results.length && <span className="result-note">Review before adding</span>}</div>
-          {results.length ? <div className="media-grid">{results.map((result) => <TrackCard key={resultKey(result)} result={result} queued={queued.has(resultKey(result))} disabled={!!busy} onOpen={() => openSet(result)} action={() => addSearchResult(result)} />)}</div>
-            : <div className="inline-empty"><strong>No matches yet</strong><span>Try fewer words, check the spelling, or search by artist and title.</span></div>}
-        </section>}
+                {artistView.topTracks?.length > 0 && (
+                  <div className="result-block">
+                    <div className="block-head">
+                      <h3>Popular Songs</h3>
+                      <span>Top {artistView.topTracks.length}</span>
+                    </div>
+                    <div className="media-grid">
+                      {artistView.topTracks.map((track) => (
+                        <TrackCard
+                          key={resultKey(track)}
+                          result={track}
+                          queued={queued.has(resultKey(track))}
+                          disabled={!!busy}
+                          onAlbumClick={openSet}
+                          action={() => addSearchResult(track)}
+                          onDownloadNow={() => addSearchResult(track, { priority: true, preempt: true })}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </section>
+        )}
+
+        {mode === 'search' && !artistView && searchState === 'idle' && (
+          <div className="discovery-empty">
+            <div className="empty-orbit"><span>♪</span></div>
+            <h2>Lossless FLAC search</h2>
+            <p>Search for any artist, album, or song. Click an artist to browse their discography or click an album to inspect its tracks.</p>
+          </div>
+        )}
+
+        {mode === 'search' && !artistView && searchState === 'loading' && (
+          <section className="results-section" aria-busy="true">
+            <div className="results-heading"><div><span className="eyebrow">Searching</span><h2>Finding matching artists, albums, and songs…</h2></div></div>
+            <div className="media-grid skeleton-grid">{Array.from({ length: 8 }, (_, i) => <div className="media-card skeleton" key={i} />)}</div>
+          </section>
+        )}
+
+        {mode === 'search' && !artistView && searchState === 'done' && (
+          <section className="results-section">
+            {!results.length ? (
+              <div className="inline-empty"><strong>No matches yet</strong><span>Try fewer words, check the spelling, or switch the filter tab above.</span></div>
+            ) : (
+              <>
+                {/* Artists Section */}
+                {(searchFilter === 'all' || searchFilter === 'artists') && artistResults.length > 0 && (
+                  <div className="result-block">
+                    <div className="block-head">
+                      <h3>Artists</h3>
+                      {searchFilter === 'all' && artistResults.length > 6 && (
+                        <button type="button" className="btn btn-sm btn-ghost" onClick={() => setSearchFilter('artists')}>
+                          See all {artistResults.length}
+                        </button>
+                      )}
+                    </div>
+                    <div className="artist-grid">
+                      {(searchFilter === 'all' ? artistResults.slice(0, 6) : artistResults).map((ar) => (
+                        <ArtistCard key={resultKey(ar)} artist={ar} onOpen={openArtist} disabled={!!busy} />
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Albums Section */}
+                {(searchFilter === 'all' || searchFilter === 'albums') && albumResults.length > 0 && (
+                  <div className="result-block">
+                    <div className="block-head">
+                      <h3>Albums</h3>
+                      {searchFilter === 'all' && albumResults.length > 5 && (
+                        <button type="button" className="btn btn-sm btn-ghost" onClick={() => setSearchFilter('albums')}>
+                          See all {albumResults.length}
+                        </button>
+                      )}
+                    </div>
+                    <div className="media-grid">
+                      {(searchFilter === 'all' ? albumResults.slice(0, 5) : albumResults).map((result) => (
+                        <TrackCard
+                          key={resultKey(result)}
+                          result={result}
+                          queued={queued.has(resultKey(result))}
+                          disabled={!!busy}
+                          onOpen={() => openSet(result)}
+                          onArtistClick={openArtist}
+                          action={() => addSearchResult(result)}
+                          onDownloadNow={() => addSearchResult(result, { priority: true, preempt: true })}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Songs Section */}
+                {(searchFilter === 'all' || searchFilter === 'tracks') && trackResults.length > 0 && (
+                  <div className="result-block">
+                    <div className="block-head">
+                      <h3>Songs</h3>
+                      <span>{trackResults.length} tracks</span>
+                    </div>
+                    <div className="media-grid">
+                      {trackResults.map((result) => (
+                        <TrackCard
+                          key={resultKey(result)}
+                          result={result}
+                          queued={queued.has(resultKey(result))}
+                          disabled={!!busy}
+                          onOpen={() => openSet(result)}
+                          onArtistClick={openArtist}
+                          onAlbumClick={openSet}
+                          action={() => addSearchResult(result)}
+                          onDownloadNow={() => addSearchResult(result, { priority: true, preempt: true })}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </section>
+        )}
 
         {mode === 'link' && preview && !preview.error && <section className="results-section">
-          <div className="results-heading playlist-heading"><div className="playlist-identity">{preview.group.artworkUrl ? <img src={preview.group.artworkUrl} alt="" /> : <EmptyArtwork kind="playlist" />}<div><span className="eyebrow">Ready to review</span><h2>{preview.name}</h2><p>{preview.results.length} tracks · {preview.group.folderName}</p></div></div><button className="btn btn-primary" onClick={queuePreview} disabled={!!busy}>＋ Add all {preview.results.filter((r) => !r.isSet).length || preview.results.length}</button></div>
-          <div className="media-grid">{previewTracks.map((result, i) => <TrackCard key={`${result.title}-${i}`} result={result} actionLabel="Add track" disabled={!!busy} onOpen={() => openSet(result)} action={() => (result.isSet ? queueSet(result) : queueItems([toQueueItem({ ...result, folderName: preview.group.folderName, group: preview.group })], preview.name))} />)}</div>
+          <div className="results-heading playlist-heading">
+            <div className="playlist-identity">{preview.group.artworkUrl ? <img src={preview.group.artworkUrl} alt="" /> : <EmptyArtwork kind="playlist" />}<div><span className="eyebrow">Ready to review</span><h2>{preview.name}</h2><p>{preview.results.length} tracks · {preview.group.folderName}</p></div></div>
+            <div className="row-actions">
+              <button className="btn btn-primary" onClick={() => queuePreview()} disabled={!!busy}>＋ Add all {preview.results.filter((r) => !r.isSet).length || preview.results.length}</button>
+              <button className="btn btn-icon" onClick={() => queuePreview({ priority: true, preempt: true })} disabled={!!busy} title="Download all immediately">⚡</button>
+            </div>
+          </div>
+          <div className="media-grid">{previewTracks.map((result, i) => (
+            <TrackCard
+              key={`${result.title}-${i}`}
+              result={result}
+              actionLabel="Queue"
+              disabled={!!busy}
+              onOpen={() => openSet(result)}
+              onArtistClick={openArtist}
+              action={() => (result.isSet ? queueSet(result) : queueItems([toQueueItem({ ...result, folderName: preview.group.folderName, group: preview.group })], preview.name))}
+              onDownloadNow={() => (result.isSet ? queueSet(result, { priority: true, preempt: true }) : queueItems([toQueueItem({ ...result, folderName: preview.group.folderName, group: preview.group })], preview.name, false, { priority: true, preempt: true }))}
+            />
+          ))}</div>
         </section>}
 
         {mode === 'profile' && profile && <section className="results-section">
@@ -862,12 +1326,21 @@ export default function AddView({ onToast }) {
           </p>
           <div className="playlist-grid">{sortPlaylists(profile.playlists, order).map((playlist) => (
             <article className="playlist-card" key={playlist.id}>
-              <div className="playlist-cover">{playlist.image ? <img src={playlist.image} alt="" loading="lazy" /> : <EmptyArtwork kind="playlist" />}</div>
+              <div className="playlist-cover">
+                {playlist.image ? <img src={playlist.image} alt="" loading="lazy" /> : <EmptyArtwork kind="playlist" />}
+                <div className="cover-hover-actions">
+                  <button type="button" className="hover-btn primary" onClick={() => queuePlaylist(playlist)} disabled={!!busy}>
+                    ＋ Queue Playlist
+                  </button>
+                  <button type="button" className="hover-btn icon-only priority" onClick={() => queuePlaylist(playlist, { priority: true, preempt: true })} disabled={!!busy} title="Download playlist now">
+                    ⚡
+                  </button>
+                </div>
+              </div>
               <div className="playlist-copy">
                 <h3 title={playlist.name}>{playlist.name}</h3>
                 <p>{playlist.tracks > 0 ? `${playlist.tracks} tracks` : (playlist.service === 'deezer' ? 'Deezer playlist' : 'Spotify playlist')}</p>
               </div>
-              <button className="btn card-action" onClick={() => queuePlaylist(playlist)} disabled={!!busy}>＋ Add playlist</button>
             </article>))}
           </div>
         </section>}
@@ -885,8 +1358,11 @@ export default function AddView({ onToast }) {
       </div>
 
       {setModal && <SetModal state={setModal} busy={busy} onClose={() => setSetModal(null)}
+        onOpenArtist={openArtist}
         onQueueAll={() => queueItems(setModal.preview.results.map(setModalItem), setModal.preview.name)}
-        onQueueOne={(r) => queueItems([setModalItem(r)], setModal.preview.name)} />}
+        onDownloadAllNow={() => queueItems(setModal.preview.results.map(setModalItem), setModal.preview.name, false, { priority: true, preempt: true })}
+        onQueueOne={(r) => queueItems([setModalItem(r)], setModal.preview.name)}
+        onDownloadOneNow={(r) => queueItems([setModalItem(r)], setModal.preview.name, false, { priority: true, preempt: true })} />}
     </>
   );
 }
