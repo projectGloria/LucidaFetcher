@@ -180,19 +180,21 @@ try {
     const delay = () => new Promise(resolve => setTimeout(resolve, 50));
     [...document.querySelectorAll('.nav-item')].find(button => button.textContent.includes('Add music')).click();
     await delay();
-    [...document.querySelectorAll('.mode-tab')].find(button => button.textContent.includes('Paste a link')).click();
+    [...document.querySelectorAll('.mode-tab')].find(button => button.textContent.includes('Search or paste a link')).click();
     await delay();
-    const input = document.querySelector('#music-link');
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'Artist - Song');
+    // Search and links share one box; a URL routes to the link path, so an
+    // unsupported one must be explained rather than searched for as text.
+    const input = document.querySelector('#music-search');
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'https://example.com/not-music');
     input.dispatchEvent(new Event('input', { bubbles: true }));
     await delay();
     input.closest('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await delay();
-    if (document.querySelector('[role="alert"]') || !document.querySelector('#music-link') || !document.querySelector('.sidebar')) {
-      throw new Error('Plain text in link preview broke the interface');
+    if (document.querySelector('.main [role="alert"]:not(.toast)') || !document.querySelector('#music-search') || !document.querySelector('.sidebar')) {
+      throw new Error('An unsupported link broke the interface');
     }
-    if (![...document.querySelectorAll('.toast.err')].some(toast => toast.textContent.includes('Paste a Spotify or Deezer'))) {
-      throw new Error('Invalid link preview did not explain which links are supported');
+    if (![...document.querySelectorAll('.toast.err')].some(toast => toast.textContent.includes('not a Spotify or Deezer'))) {
+      throw new Error('Unsupported link did not explain which links are supported');
     }
   };
   const renderer = `

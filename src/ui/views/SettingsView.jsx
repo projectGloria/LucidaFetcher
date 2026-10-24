@@ -3,6 +3,7 @@ import { exportDiagnostics } from '../diagnostics.js';
 import { isElectron, ipc, getController } from '../engine.js';
 import { configureSounds, play } from '../sounds.js';
 import SourceIcon from '../components/SourceIcon.jsx';
+import Icon from '../components/Icon.jsx';
 import { SERVICE_LABELS } from '../../engine/status.mjs';
 
 const ALL_SERVICES = ['qobuz', 'tidal', 'deezer', 'amazon', 'yandex', 'monochrome'];
@@ -60,6 +61,12 @@ export default function SettingsView({ config, setConfig, onToast, throttleOff =
     patch({ [key]: n });
     if (apply) apply(n);
   };
+  // Pointer release, keyboard release and blur all commit - whichever ends the
+  // interaction first. Spread onto each slider rather than repeated three times.
+  const commitOn = (key, apply) => {
+    const commit = onRangeCommit(key, apply);
+    return { onPointerUp: commit, onKeyUp: commit, onBlur: commit };
+  };
 
   const patch = (next) => {
     const merged = { ...local, ...next };
@@ -87,295 +94,258 @@ export default function SettingsView({ config, setConfig, onToast, throttleOff =
     patch({ fallbackServices: next });
   };
 
+  const setConcurrency = (n) => { const c = getController(); if (c && c.setConcurrency) c.setConcurrency(n); };
+  const setMaxTransfers = (n) => { const c = getController(); if (c) c.maxTransfers = n; };
+  const services = local.fallbackServices || ['amazon'];
+
   return (
     <>
       <header className="topbar">
         <div>
           <h1>Settings</h1>
-          <span className="topbar-subtitle">Downloads land where you point them, at the speed you allow</span>
+          <span className="topbar-sub">Saved as you change them</span>
         </div>
       </header>
 
-      <div className="pane settings-grid">
-        <section className="card">
-          <div className="card-head"><h2>Destination</h2></div>
-          <div className="card-body">
-            <div className="field">
-              <label htmlFor="folder">Download folder</label>
-              <div className="row-actions">
-                <input
-                  id="folder"
-                  className="input"
-                  readOnly
-                  value={local.downloadPath || ''}
-                  placeholder="Select a folder…"
-                />
-                <button className="btn" disabled={!isElectron} onClick={pickFolder}>
-                  Browse…
-                </button>
-                <button
-                  className="btn"
-                  disabled={!isElectron || !local.downloadPath}
-                  onClick={() => ipc.invoke('open-path', local.downloadPath)}
-                >
-                  Open
-                </button>
+      <div className="pane">
+        <div className="settings">
+          <section className="settings-section">
+            <h2>Library</h2>
+            <div className="settings-card">
+              <div className="setting-block">
+                <div className="setting-copy">
+                  <label className="setting-title" htmlFor="folder">Download folder</label>
+                  <span className="setting-desc">Playlists and albums each get their own subfolder inside it.</span>
+                </div>
+                <div className="path-ctl">
+                  <input id="folder" className="input" readOnly value={local.downloadPath || ''} placeholder="Select a folder…" />
+                  <button className="btn" disabled={!isElectron} onClick={pickFolder}>Browse…</button>
+                  <button className="btn btn-icon" disabled={!isElectron || !local.downloadPath}
+                    onClick={() => ipc.invoke('open-path', local.downloadPath)} title="Open folder" aria-label="Open folder">
+                    <Icon name="folder" size={16} />
+                  </button>
+                </div>
               </div>
-              <span className="hint">
-                Every track lands inside this folder. A track downloaded as part of a
-                playlist or album goes into its own subfolder underneath it.
-              </span>
             </div>
-          </div>
-        </section>
+          </section>
 
-        <section className="card">
-          <div className="card-head"><h2>Downloading</h2></div>
-          <div className="card-body">
-            <div className="field">
-              <label htmlFor="conc">Simultaneous downloads — {rangeValue('concurrency', 3)}</label>
-              <input
-                id="conc" type="range" min="1" max="6" step="1"
-                value={rangeValue('concurrency', 3)}
-                onChange={onRangeDrag('concurrency')}
-                onPointerUp={onRangeCommit('concurrency', (n) => {
-                  const c = getController();
-                  if (c && c.setConcurrency) c.setConcurrency(n);
-                })}
-                onKeyUp={onRangeCommit('concurrency', (n) => {
-                  const c = getController();
-                  if (c && c.setConcurrency) c.setConcurrency(n);
-                })}
-                onBlur={onRangeCommit('concurrency', (n) => {
-                  const c = getController();
-                  if (c && c.setConcurrency) c.setConcurrency(n);
-                })}
-              />
-              <span className="hint">
-                Each one drives its own hidden browser page. Three is a good balance —
-                the sites are free community services, and pushing much harder tends to
-                trip rate limits, which costs more time than the extra lanes save.
-              </span>
-            </div>
+          <section className="settings-section">
+            <h2>Downloading</h2>
+            <div className="settings-card">
+              <div className="setting-row">
+                <div className="setting-copy">
+                  <label className="setting-title" htmlFor="conc">Simultaneous searches</label>
+                  <span className="setting-desc">
+                    Each runs its own hidden browser page. 3 is the sweet spot; the sources are
+                    free community services and push back with rate limits.
+                  </span>
+                </div>
+                <div className="setting-ctl range-ctl">
+                  <input id="conc" type="range" min="1" max="6" step="1"
+                    value={rangeValue('concurrency', 3)}
+                    onChange={onRangeDrag('concurrency')}
+                    {...commitOn('concurrency', setConcurrency)} />
+                  <span className="value-badge">{rangeValue('concurrency', 3)}</span>
+                </div>
+              </div>
 
-            <div className="divider" />
+              <div className="setting-row">
+                <div className="setting-copy">
+                  <label className="setting-title" htmlFor="transfers">Transfers running ahead</label>
+                  <span className="setting-desc">
+                    Files that keep downloading while their page moves on to the next search.
+                    0 makes each page wait for its own file.
+                  </span>
+                </div>
+                <div className="setting-ctl range-ctl">
+                  <input id="transfers" type="range" min="0" max="8" step="1"
+                    value={rangeValue('maxTransfers', 6)}
+                    onChange={onRangeDrag('maxTransfers')}
+                    {...commitOn('maxTransfers', setMaxTransfers)} />
+                  <span className="value-badge">{rangeValue('maxTransfers', 6)}</span>
+                </div>
+              </div>
 
-            <label className="switch">
-              <input type="checkbox" checked={!!local.keepTrying}
-                onChange={(e) => patch({ keepTrying: e.target.checked })} />
-              <span className="track" />
-              <span>
-                <div style={{ fontWeight: 550 }}>Keep trying</div>
-                <div className="hint">After all searches and downloads finish, automatically retry missing tracks. Waits 30 seconds between passes, increasing to 5 minutes for repeated failures. Pause or cancel all to stop retries.</div>
-              </span>
-            </label>
+              <div className="setting-row">
+                <div className="setting-copy">
+                  <label className="setting-title" htmlFor="speed">Speed limit</label>
+                  {throttleOff ? (
+                    // Saying nothing here is how the limiter used to disable itself
+                    // for the rest of the session while this field went on showing a
+                    // number that no longer did anything.
+                    <span className="setting-desc warn-text">
+                      Not being applied: a server in this session restarted its transfer whenever
+                      it was paused, so the limiter switched itself off. Restart the app to try again.
+                    </span>
+                  ) : (
+                    <span className="setting-desc">Total across all transfers. 0 means unlimited.</span>
+                  )}
+                </div>
+                <div className="setting-ctl suffix-input">
+                  <input
+                    id="speed" className="input" type="number" min="0"
+                    value={draftSpeed}
+                    onChange={(e) => setDraftSpeed(e.target.value)}
+                    onBlur={commitSpeed}
+                    onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+                  />
+                  <span>KB/s</span>
+                </div>
+              </div>
 
-            <div className="divider" />
-
-            <div className="field">
-              <label htmlFor="transfers">
-                Transfers running ahead — {rangeValue('maxTransfers', 6)}
-              </label>
-              <input
-                id="transfers" type="range" min="0" max="8" step="1"
-                value={rangeValue('maxTransfers', 6)}
-                onChange={onRangeDrag('maxTransfers')}
-                onPointerUp={onRangeCommit('maxTransfers', (n) => {
-                  const c = getController();
-                  if (c) c.maxTransfers = n;
-                })}
-                onKeyUp={onRangeCommit('maxTransfers', (n) => {
-                  const c = getController();
-                  if (c) c.maxTransfers = n;
-                })}
-                onBlur={onRangeCommit('maxTransfers', (n) => {
-                  const c = getController();
-                  if (c) c.maxTransfers = n;
-                })}
-              />
-              <span className="hint">
-                Searching and downloading use different things — a hidden page for the
-                first, the network for the second — so a page does not have to sit and
-                watch a file arrive. This is how many files may still be arriving while
-                their pages have moved on to search the next tracks. At 0 a page waits
-                for its own file, which is the old behaviour.
-              </span>
-            </div>
-
-            <div className="divider" />
-
-            <div className="field">
-              <label htmlFor="speed">Speed limit (KB/s, 0 = unlimited)</label>
-              <input
-                id="speed" className="input" type="number" min="0"
-                value={draftSpeed}
-                onChange={(e) => setDraftSpeed(e.target.value)}
-                onBlur={commitSpeed}
-                onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
-              />
-              {throttleOff && (
-                // Saying nothing here is how the limiter used to disable itself
-                // for the rest of the session while this field went on showing a
-                // number that no longer did anything.
-                <span className="hint" style={{ color: 'var(--warn, #e0b341)' }}>
-                  Not being applied: a server in this session restarted its transfer
-                  whenever it was paused, so the limiter turned itself off to avoid a
-                  download that could never finish. Restart the app to try again.
+              <label className="switch setting-row">
+                <span className="setting-copy">
+                  <span className="setting-title">Keep trying</span>
+                  <span className="setting-desc">
+                    Retry missing tracks after the queue finishes — every 30 seconds at first,
+                    backing off to 5 minutes. Pause or Cancel all stops it.
+                  </span>
                 </span>
+                <span className="switch-ctl">
+                  <input type="checkbox" checked={!!local.keepTrying}
+                    onChange={(e) => patch({ keepTrying: e.target.checked })} />
+                  <span className="track" />
+                </span>
+              </label>
+            </div>
+          </section>
+
+          <section className="settings-section">
+            <h2>Sources</h2>
+            <div className="settings-card">
+              <div className="setting-block">
+                <div className="setting-copy">
+                  <span className="setting-title">Where to look, in order</span>
+                  <span className="setting-desc">
+                    Click to enable; the number is the order they are tried. Only FLAC is accepted —
+                    a track no enabled source has is marked missing.
+                  </span>
+                </div>
+                <div className="source-chips">
+                  {ALL_SERVICES.map((sv) => {
+                    const idx = services.indexOf(sv);
+                    const on = idx !== -1;
+                    return (
+                      <button
+                        key={sv}
+                        className="source-chip"
+                        onClick={() => toggleService(sv)}
+                        aria-pressed={on}
+                        title={on ? `Tried #${idx + 1} — click to disable` : 'Click to enable'}
+                      >
+                        <SourceIcon service={sv} size={20} title="" />
+                        {SERVICE_LABELS[sv] || sv}
+                        {on && <span className="source-rank">{idx + 1}</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section className="settings-section">
+            <h2>App</h2>
+            <div className="settings-card">
+              <label className="switch setting-row">
+                <span className="setting-copy">
+                  <span className="setting-title">Keep running in the tray when the window is closed</span>
+                  <span className="setting-desc">
+                    Closing hides the window instead of ending the run. Turn off to make close quit.
+                  </span>
+                </span>
+                <span className="switch-ctl">
+                  <input type="checkbox" checked={local.closeToTray !== false}
+                    onChange={(e) => patch({ closeToTray: e.target.checked })} />
+                  <span className="track" />
+                </span>
+              </label>
+
+              <label className="switch setting-row">
+                <span className="setting-copy">
+                  <span className="setting-title">Play a sound on each result</span>
+                  <span className="setting-desc">
+                    A rising cue when a track lands, a falling one when it cannot be found,
+                    and a longer one when the queue finishes.
+                  </span>
+                </span>
+                <span className="switch-ctl">
+                  <input
+                    type="checkbox"
+                    checked={!!local.sounds}
+                    onChange={(e) => {
+                      const on = e.target.checked;
+                      patch({ sounds: on });
+                      configureSounds({ enabled: on });
+                      if (on) play('complete'); // confirm audibly, on the click that enabled it
+                    }}
+                  />
+                  <span className="track" />
+                </span>
+              </label>
+
+              {local.sounds && (
+                <div className="setting-row">
+                  <div className="setting-copy">
+                    <label className="setting-title" htmlFor="vol">Volume</label>
+                  </div>
+                  <div className="setting-ctl range-ctl">
+                    <input
+                      id="vol" type="range" min="0" max="1" step="0.05"
+                      value={rangeValue('soundVolume', 0.35)}
+                      onChange={(e) => {
+                        const v = Number(e.target.value);
+                        setDragging((d) => ({ ...d, soundVolume: v }));
+                        configureSounds({ volume: v });
+                      }}
+                      onPointerUp={onRangeCommit('soundVolume', () => play('complete'))}
+                      onKeyUp={onRangeCommit('soundVolume', () => play('complete'))}
+                      onBlur={onRangeCommit('soundVolume')}
+                    />
+                    <span className="value-badge">{Math.round(rangeValue('soundVolume', 0.35) * 100)}</span>
+                  </div>
+                </div>
               )}
             </div>
-          </div>
-        </section>
+          </section>
 
-        <section className="card">
-          <div className="card-head">
-            <h2>Sources</h2>
-            <span className="spacer" style={{ flex: 1 }} />
-            <span className="pill">tried in order</span>
-          </div>
-          <div className="card-body">
-            <span className="hint" style={{ marginTop: -4 }}>
-              Only enabled sources are checked, in the order you select them.
-              Downloads must be FLAC. YouTube and SoundCloud are never download sources.
-            </span>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--s2)' }}>
-              {ALL_SERVICES.map((sv) => {
-                const list = local.fallbackServices || ['amazon'];
-                const idx = list.indexOf(sv);
-                const on = idx !== -1;
-                return (
-                  <button
-                    key={sv}
-                    className={`btn btn-sm ${on ? 'btn-primary' : ''}`}
-                    onClick={() => toggleService(sv)}
-                    aria-pressed={on}
-                    title={on ? `Priority #${idx + 1} — click to disable` : 'Click to enable'}
-                  >
-                    <SourceIcon service={sv} size={20} title="" />{SERVICE_LABELS[sv] || sv}
-                    {on && <span style={{ marginLeft: 6, fontSize: '0.85em', opacity: 0.85, fontWeight: 700 }}>#{idx + 1}</span>}
-                  </button>
-                );
-              })}
-            </div>
-            <span className="hint">
-              Imported links identify tracks to search for on your enabled sources.
-              If no enabled source provides FLAC, the track is marked missing.
-            </span>
-          </div>
-        </section>
-
-        <section className="card">
-          <div className="card-head"><h2>Diagnostics</h2></div>
-          <div className="card-body">
-            <p className="hint" style={{ marginTop: 0 }}>
-              Everything the app does is written to a session log. This turns that log into a
-              single readable report — what failed, which sources answered, and the exact
-              chain of sources tried for every track that did not download — with the raw
-              events underneath it.
-            </p>
-            <div className="field">
-              <label htmlFor="diag-notes">What were you doing? (optional)</label>
-              <input
-                id="diag-notes"
-                className="input"
-                placeholder="e.g. downloaded a profile, half the tracks came back missing"
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-              />
-              <div className="hint">
-                The one thing no amount of logging can recover, and the first thing anyone
-                reading the report wants to know.
-              </div>
-            </div>
-            <label className="switch">
-              <input
-                type="checkbox"
-                checked={withPrevious}
-                onChange={(e) => setWithPrevious(e.target.checked)}
-              />
-              <span className="track" />
-              <span>
-                <div style={{ fontWeight: 550 }}>Include the last 3 sessions</div>
-                <div className="hint">For a problem that also happened yesterday. Off by default — a bigger report is a slower read.</div>
-              </span>
-            </label>
-            <div className="row-actions" style={{ marginTop: 'var(--s3)' }}>
-              <button className="btn btn-primary" disabled={!isElectron || exporting} onClick={saveReport}>
-                {exporting ? 'Building report…' : '↓ Export diagnostics report'}
-              </button>
-              <button className="btn" disabled={!isElectron} onClick={() => ipc.invoke('open-log-folder')}>
-                Open logs folder
-              </button>
-            </div>
-          </div>
-        </section>
-
-        <section className="card">
-          <div className="card-head"><h2>Window</h2></div>
-          <div className="card-body">
-            <label className="switch">
-              <input
-                type="checkbox"
-                checked={local.closeToTray !== false}
-                onChange={(e) => patch({ closeToTray: e.target.checked })}
-              />
-              <span className="track" />
-              <span>
-                <div style={{ fontWeight: 550 }}>Keep running in the tray when the window is closed</div>
-                <div className="hint">
-                  A queue is measured in hours, so closing the window hides it instead of ending
-                  the run — the tray icon opens it again, and its menu can pause or quit.
-                  Turn this off to make the close button quit the app outright.
+          <section className="settings-section">
+            <h2>Diagnostics</h2>
+            <div className="settings-card">
+              <div className="setting-block">
+                <div className="setting-copy">
+                  <label className="setting-title" htmlFor="diag-notes">Export a report</label>
+                  <span className="setting-desc">
+                    Turns the session log into one readable file: what failed, which sources answered,
+                    and every source tried for each track that did not download.
+                  </span>
                 </div>
-              </span>
-            </label>
-          </div>
-        </section>
-
-        <section className="card">
-          <div className="card-head"><h2>Sounds</h2></div>
-          <div className="card-body">
-            <label className="switch">
-              <input
-                type="checkbox"
-                checked={!!local.sounds}
-                onChange={(e) => {
-                  const on = e.target.checked;
-                  patch({ sounds: on });
-                  configureSounds({ enabled: on });
-                  if (on) play('complete'); // confirm audibly, on the click that enabled it
-                }}
-              />
-              <span className="track" />
-              <span>
-                <div style={{ fontWeight: 550 }}>Play a sound on each result</div>
-                <div className="hint">
-                  A short rising cue when a track lands, a falling one when a track cannot
-                  be found, and a longer one when the whole queue finishes. Off by default.
-                </div>
-              </span>
-            </label>
-
-            {local.sounds && (
-              <div className="field">
-                <label htmlFor="vol">Volume</label>
                 <input
-                  id="vol" type="range" min="0" max="1" step="0.05"
-                  value={rangeValue('soundVolume', 0.35)}
-                  onChange={(e) => {
-                    const v = Number(e.target.value);
-                    setDragging((d) => ({ ...d, soundVolume: v }));
-                    configureSounds({ volume: v });
-                  }}
-                  onPointerUp={onRangeCommit('soundVolume', () => play('complete'))}
-                  onKeyUp={onRangeCommit('soundVolume', () => play('complete'))}
-                  onBlur={onRangeCommit('soundVolume')}
+                  id="diag-notes"
+                  className="input"
+                  placeholder="What were you doing? e.g. downloaded a profile, half came back missing"
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
                 />
+                <label className="switch">
+                  <span className="switch-ctl">
+                    <input type="checkbox" checked={withPrevious} onChange={(e) => setWithPrevious(e.target.checked)} />
+                    <span className="track" />
+                  </span>
+                  <span className="setting-desc" style={{ marginTop: 0 }}>Include the last 3 sessions</span>
+                </label>
+                <div className="row-actions">
+                  <button className="btn btn-primary" disabled={!isElectron || exporting} onClick={saveReport}>
+                    <Icon name="file" size={15} />{exporting ? 'Building report…' : 'Export report'}
+                  </button>
+                  <button className="btn btn-ghost" disabled={!isElectron} onClick={() => ipc.invoke('open-log-folder')}>
+                    Open logs folder
+                  </button>
+                </div>
               </div>
-            )}
-          </div>
-        </section>
-
+            </div>
+          </section>
+        </div>
       </div>
     </>
   );

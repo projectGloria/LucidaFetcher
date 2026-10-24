@@ -3,6 +3,7 @@ import { getController, isElectron, ipc } from '../engine.js';
 import { serviceLabel } from '../../engine/status.mjs';
 import { displayedService } from '../../engine/source-display.mjs';
 import SourceIcon from './SourceIcon.jsx';
+import Icon from './Icon.jsx';
 
 // Past this, a search reads as slow rather than routine - long enough that
 // most real answers have already come back, short enough to say something
@@ -12,11 +13,16 @@ const SLOW_AFTER_MS = 45000;
 // Which visual weight a status carries. "searching" is deliberately quiet: in a
 // list of two hundred rows, most of them are searching most of the time, and
 // making that state loud turns the whole list into noise.
+//
+// Labels say what the engine is doing, not a generic "Working". The detail
+// column next to the pill carries the last source's verdict ("Qobuz found it but
+// could not supply the audio"), and under a "Working" pill that read as a
+// contradiction; under "Searching" it reads as the reason the search goes on.
 const TONE = {
   queued:      { pill: '',            label: 'Queued' },
   paused:      { pill: 'paused-tone', label: 'Paused' },
-  searching:   { pill: 'accent live', label: 'Working' },
-  fetching:    { pill: 'accent live', label: 'Working' },
+  searching:   { pill: 'accent live', label: 'Searching' },
+  fetching:    { pill: 'accent live', label: 'Fetching' },
   // Fetched and handed to the network, nothing moving yet. Given its own tone
   // rather than folded into "Downloading": the whole point is being able to see
   // at a glance how much work is already banked ahead of the transfers.
@@ -46,16 +52,17 @@ export default function TrackRow({
   const canPause = busy || isQueued;
   const canResume = isPaused || status === 'cancelled' || status === 'skipped';
   const canPrioritize = (isQueued || isPaused) && (!rec.priority || (queueIndex != null && queueIndex > 1));
+  const title = item.title || item.name;
 
   const pct = typeof rec.progress === 'number' ? Math.round(rec.progress * 100) : null;
   const elapsed = useElapsed(status === 'searching' || status === 'fetching' ? rec.attemptStartedAt : null);
   const slow = elapsed !== null && elapsed >= SLOW_AFTER_MS;
   useRowProgress(rec);
 
-  const statusClass =
-    status === 'skipped' ? 'status warnc'
-    : status === 'cancelled' ? 'status err'
-    : 'status';
+  const detailClass =
+    status === 'skipped' ? 'detail warnc'
+    : status === 'cancelled' ? 'detail err'
+    : 'detail';
 
   const openFolder = () => {
     if (!isElectron) return;
@@ -81,102 +88,106 @@ export default function TrackRow({
       onDragStart={onDragStart ? (e) => onDragStart(e, id) : undefined}
       onDragOver={onDragOver ? (e) => onDragOver(e, id) : undefined}
       onDrop={onDrop ? (e) => onDrop(e, id) : undefined}
+      onDoubleClick={status === 'completed' ? openFolder : undefined}
     >
       <div className="art-wrap">
         {item.image
           ? <img className="art" src={item.image} alt="" loading="lazy" referrerPolicy="no-referrer" />
-          : <div className="art" aria-hidden="true" />}
+          : <div className="art" aria-hidden="true"><Icon name="music" size={14} /></div>}
         {queueIndex !== null && (isQueued || busy) && (
-          <span className="queue-rank" title={`Queue position #${queueIndex}`}>#{queueIndex}</span>
+          <span className="queue-rank" title={`Queue position #${queueIndex}`}>{queueIndex}</span>
         )}
       </div>
 
-      <div className="info">
-        <div className="title">
-          {rec.priority && (isQueued || busy) && (
-            <span className="priority-badge" title="Prioritized track">⚡</span>
-          )}
-          {item.title || item.name}
-        </div>
-        <div className="artist">{item.artist}</div>
-        {/* The whole point of the redesign: not "Fetching…" but which source is
-            being asked, and what the last one actually said. */}
-        <div className={statusClass}>
-          <SourceTrail rec={rec} />
-          <span className="truncate" title={statusText}>{statusText}</span>
-          {/* Below SLOW_AFTER_MS this is silent - most searches are quick and a
-              timer on every row would just be noise. Past it, it is the one
-              thing that tells "still working" apart from "looks frozen". */}
-          {slow && <span className="elapsed" title="How long the current source has been asked">{formatElapsed(elapsed)}</span>}
-        </div>
+      <div className="title" title={title}>
+        {rec.priority && (isQueued || busy) && <Icon name="zap" size={12} label="Prioritized" />}
+        <span className="truncate">{title}</span>
+      </div>
+      <div className="artist truncate" title={item.artist}>{item.artist}</div>
+
+      {/* Which source is being asked, and what the last one actually said -
+          not just "Fetching…". */}
+      <div className={detailClass}>
+        <SourceTrail rec={rec} />
+        <span className="truncate" title={statusText}>{statusText}</span>
+        {/* Below SLOW_AFTER_MS this is silent - most searches are quick and a
+            timer on every row would just be noise. Past it, it is the one
+            thing that tells "still working" apart from "looks frozen". */}
+        {slow && <span className="elapsed" title="How long the current source has been asked">{formatElapsed(elapsed)}</span>}
       </div>
 
-      <span
-        className={`pill ${tone.pill} ${slow ? 'slow' : ''}`}
-        title={rec.reused && status === 'completed' ? 'Already downloaded for another playlist' : undefined}
-      >
-        {busy && <span className="dot" />}
-        {status === 'downloading' && pct !== null
-          ? `${pct}%`
-          : rec.reused && status === 'completed'
-            ? 'Done (reused)'
-            : tone.label}
-      </span>
+      <div className="state">
+        {status === 'downloading' || status === 'ready' ? (
+          <div className="row-progress" title={status === 'ready' ? 'Fetched, waiting for the network' : 'Downloading'}>
+            {/* A ready track gets a hatched empty bar, not the indeterminate
+                sweep: the sweep means "moving, length unknown", and this one
+                is not moving at all yet. */}
+            <div className={`progress ${status === 'ready' ? 'waiting' : pct === null ? 'indeterminate' : ''}`}>
+              <i style={{ width: status === 'ready' ? 0 : pct === null ? undefined : `${pct}%` }} />
+            </div>
+            <span className="pct">{status === 'ready' ? '—' : pct === null ? '' : `${pct}%`}</span>
+          </div>
+        ) : (
+          <span
+            className={`pill ${tone.pill} ${slow ? 'slow' : ''}`}
+            title={rec.reused && status === 'completed' ? 'Already downloaded for another playlist' : undefined}
+          >
+            {busy && <span className="dot" />}
+            {rec.reused && status === 'completed' ? 'Done (reused)' : tone.label}
+          </span>
+        )}
+      </div>
 
       <div className="actions">
         {canPause && (
-          <button
-            className="btn btn-sm btn-ghost btn-icon"
-            onClick={() => getController().pauseItem?.(id)}
-            title="Pause this track"
-          >❚❚</button>
+          <button className="icon-btn" onClick={() => getController().pauseItem?.(id)} title="Pause this track" aria-label="Pause this track">
+            <Icon name="pause" size={13} />
+          </button>
         )}
         {canResume && (
           <button
-            className="btn btn-sm btn-ghost btn-icon"
+            className="icon-btn"
             onClick={() => getController().resumeItem?.(id)}
             title={isPaused ? 'Resume this track' : 'Retry this track'}
-          >▶</button>
+            aria-label={isPaused ? 'Resume this track' : 'Retry this track'}
+          >
+            <Icon name={isPaused ? 'play' : 'retry'} size={13} />
+          </button>
         )}
         {canPrioritize && (
           <button
-            className="btn btn-sm btn-ghost btn-icon"
+            className="icon-btn priority"
             onClick={() => {
               getController().downloadNow?.(id);
-              onToast?.(`Moved “${item.title || item.name}” to top of queue.`);
+              onToast?.(`Moved “${title}” to top of queue.`);
             }}
-            title="Download Now (move to top of queue)"
-          >⚡</button>
+            title="Download now (move to top of queue)"
+            aria-label="Download now"
+          >
+            <Icon name="zap" size={13} />
+          </button>
         )}
         {status === 'completed' && isElectron && (
-          <button className="btn btn-sm btn-ghost btn-icon" onClick={openFolder} title="Show in folder">⌕</button>
+          <button className="icon-btn" onClick={openFolder} title="Show in folder" aria-label="Show in folder">
+            <Icon name="folder" size={14} />
+          </button>
         )}
         {(status === 'queued' || busy) && (
-          <button
-            className="btn btn-sm btn-ghost btn-icon btn-danger"
-            onClick={() => getController().cancel(id)}
-            title="Cancel this track"
-          >✕</button>
+          <button className="icon-btn danger" onClick={() => getController().cancel(id)} title="Cancel this track" aria-label="Cancel this track">
+            <Icon name="x" size={14} />
+          </button>
         )}
         {!busy && status !== 'queued' && (
           <button
-            className="btn btn-sm btn-ghost btn-icon btn-danger"
+            className="icon-btn danger"
             onClick={() => getController().remove(id)}
             title="Remove from the list (the file, if any, stays)"
-          >🗑</button>
+            aria-label="Remove from the list"
+          >
+            <Icon name="trash" size={14} />
+          </button>
         )}
       </div>
-
-      {(status === 'downloading' || status === 'ready') && (
-        <div className="bar">
-          {/* A ready track gets a flat empty bar, not the indeterminate sweep:
-              the sweep means "moving, length unknown", and this one is not
-              moving at all yet. */}
-          <div className={`progress ${status === 'ready' ? 'waiting' : pct === null ? 'indeterminate' : ''}`}>
-            <i style={{ width: status === 'ready' ? 0 : pct === null ? undefined : `${pct}%` }} />
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -235,7 +246,7 @@ function SourceTrail({ rec }) {
   return (
     <span className="trail">
       <span className={rec.status === 'completed' ? 'hop ok' : 'hop now'} title={label + ' ' + serviceLabel(service)}>
-        <SourceIcon service={service} size={24} />
+        <SourceIcon service={service} size={16} />
       </span>
     </span>
   );

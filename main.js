@@ -2308,7 +2308,7 @@ function createWindow() {
     minWidth: 900,
     minHeight: 560,
     show: false,
-    backgroundColor: '#0c0d11', // matches the UI's --bg, so startup does not flash white
+    backgroundColor: '#0a0a0c', // must equal --bg in styles.css, or the window flashes a different black on launch
     webPreferences: {
       webviewTag: true,
       nodeIntegration: true,

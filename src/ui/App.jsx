@@ -1,17 +1,18 @@
-import { useEffect, useState, useRef, useSyncExternalStore } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { initEngine, isElectron, ipc, useStats, usePaused, getController } from './engine.js';
 import * as history from './history.js';
 import { configureSounds, play } from './sounds.js';
 import QueueView from './views/QueueView.jsx';
 import SettingsView from './views/SettingsView.jsx';
 import AddView from './views/AddView.jsx';
-import DownloadDock from './components/DownloadDock.jsx';
+import TransportBar from './components/TransportBar.jsx';
 import RenderBoundary from './components/RenderBoundary.jsx';
+import Icon from './components/Icon.jsx';
 
 const NAV = [
-  { id: 'queue', label: 'Downloads', icon: '⬇' },
-  { id: 'add', label: 'Add music', icon: '＋' },
-  { id: 'settings', label: 'Settings', icon: '⚙' },
+  { id: 'queue', label: 'Downloads', icon: 'download' },
+  { id: 'add', label: 'Add music', icon: 'plus' },
+  { id: 'settings', label: 'Settings', icon: 'settings' },
 ];
 
 export default function App() {
@@ -79,20 +80,30 @@ export default function App() {
   return (
     <div className="app">
       <TrayBridge />
-      <Sidebar view={view} setView={setView} />
+      <SoundCues />
+      <Sidebar view={view} setView={setView} downloadPath={config.downloadPath} />
       <main className="main">
         <RenderBoundary key={view}>
-          {view === 'queue' && <QueueView onToast={toast} preferences={config.queueView} onPreferencesChange={saveQueueView} />}
+          {view === 'queue' && (
+            <QueueView
+              onToast={toast}
+              preferences={config.queueView}
+              onPreferencesChange={saveQueueView}
+              onAddMusic={() => setView('add')}
+            />
+          )}
           {view === 'add' && <AddView onToast={toast} />}
           {view === 'settings' && (
             <SettingsView config={config} setConfig={setConfig} onToast={toast} throttleOff={throttleOff} />
           )}
         </RenderBoundary>
       </main>
-      <DownloadDock />
+      {/* Outside the view's RenderBoundary on purpose: a view that throws must
+          not take the pause button and the live transfers down with it. */}
+      <TransportBar onToast={toast} />
       <div className="toast-host">
         {toasts.map((t) => (
-          <div key={t.id} className={`toast${t.kind === 'err' ? ' err' : ''}`}>{t.text}</div>
+          <div key={t.id} className={`toast${t.kind === 'err' ? ' err' : ''}`} role={t.kind === 'err' ? 'alert' : 'status'}>{t.text}</div>
         ))}
       </div>
     </div>
@@ -102,7 +113,7 @@ export default function App() {
 function Splash() {
   return (
     <div className="empty" style={{ height: '100%' }}>
-      <div className="big">◍</div>
+      <div className="empty-icon"><Icon name="disc" size={24} /></div>
       <h3>Starting the download engine…</h3>
     </div>
   );
@@ -118,13 +129,11 @@ function Splash() {
 function BootFailure({ error }) {
   return (
     <div className="empty" style={{ height: '100%' }}>
-      <div className="big">⚠</div>
+      <div className="empty-icon"><Icon name="alert" size={24} /></div>
       <h3>The download engine could not start</h3>
-      <p style={{ color: 'var(--muted, #9aa1b8)', maxWidth: 460, textAlign: 'center' }}>
-        {String((error && error.message) || error)}
-      </p>
+      <p>{String((error && error.message) || error)}</p>
       <div className="row-actions" style={{ marginTop: 16 }}>
-        <button className="btn" onClick={() => window.location.reload()}>Try again</button>
+        <button className="btn btn-primary" onClick={() => window.location.reload()}>Try again</button>
         {isElectron && (
           <button className="btn" onClick={() => ipc.invoke('open-log-folder')}>Open the log folder</button>
         )}
@@ -138,10 +147,10 @@ function BootFailure({ error }) {
  *
  * The main process cannot see the controller - the queue lives here - so the
  * tray's status line and its Pause item are fed from the same numbers the
- * sidebar renders, and the tray's own Pause comes back the other way. Mounted
- * once, next to the engine, rather than inside a view: a tray that stopped
- * updating because the user was looking at Settings would be worse than no
- * tray at all.
+ * transport bar renders, and the tray's own Pause comes back the other way.
+ * Mounted once, next to the engine, rather than inside a view: a tray that
+ * stopped updating because the user was looking at Settings would be worse
+ * than no tray at all.
  */
 function TrayBridge() {
   const stats = useStats();
@@ -170,36 +179,45 @@ function TrayBridge() {
   return null;
 }
 
-function Sidebar({ view, setView }) {
+/**
+ * Sound cues, driven from the numbers rather than from engine events so one
+ * place decides when something is worth hearing about.
+ *
+ * This used to live inside the sidebar, which meant the nav component owned a
+ * side effect that had nothing to do with navigation. It is its own null
+ * component now, mounted beside TrayBridge for the same always-on reason.
+ */
+function SoundCues() {
   const stats = useStats();
-  const paused = usePaused();
-  const prevDone = useRef(stats);
+  // The previous snapshot is a ref, not state: it is read and replaced inside
+  // the effect and must never trigger a render of its own.
+  const prev = useRef(stats);
 
-  // Sound cues are driven from the numbers rather than from engine events, so
-  // one place decides when something is worth hearing about.
   useEffect(() => {
-    const p = prevDone.current;
+    const p = prev.current;
     const changed = stats.completed + stats.skipped > p.completed + p.skipped;
     const nowIdle = stats.queued === 0 && stats.active === 0;
-    if (changed && nowIdle && stats.total > 0) {
-      play('finished');
-    } else if (stats.completed > p.completed) play('complete');
+    if (changed && nowIdle && stats.total > 0) play('finished');
+    else if (stats.completed > p.completed) play('complete');
     else if (stats.skipped > p.skipped) play('skipped');
-    prevDone.current = stats;
-  }, [stats.completed, stats.skipped, stats.queued, stats.active, stats.total]);
+    prev.current = stats;
+  }, [stats]);
 
+  return null;
+}
+
+function Sidebar({ view, setView, downloadPath }) {
+  const stats = useStats();
   const counts = { queue: stats.queued + stats.active + (stats.paused || 0) };
-  useSyncExternalStore(history.subscribe, history.getSnapshot);
-  const looked = history.list().length;
 
   return (
     <aside className="sidebar">
       <div className="brand">
-        <span className="mark" aria-hidden="true">♫</span>
+        <span className="mark" aria-hidden="true"><Icon name="music" size={15} strokeWidth={2.4} /></span>
         <span>Lucida Fetcher</span>
       </div>
 
-      <nav className="nav">
+      <nav className="nav" aria-label="Main">
         {NAV.map((n) => (
           <button
             key={n.id}
@@ -207,65 +225,27 @@ function Sidebar({ view, setView }) {
             aria-current={view === n.id ? 'page' : undefined}
             onClick={() => setView(n.id)}
           >
-            <span aria-hidden="true" style={{ width: 14, textAlign: 'center', opacity: .75 }}>{n.icon}</span>
+            <Icon name={n.icon} size={17} />
             <span>{n.label}</span>
             {counts[n.id] > 0 && <span className="count">{counts[n.id]}</span>}
           </button>
         ))}
       </nav>
 
+      {/* The one place the destination is always visible - "where did it put
+          my files" is the most common question a downloader gets asked. */}
       <div className="sidebar-foot">
-        <div className="stat-grid">
-          <div className="stat accent"><div className="n">{stats.active}</div><div className="l">Active</div></div>
-          <div className="stat ok"><div className="n">{stats.completed}</div><div className="l">Done</div></div>
-          <div className="stat warn"><div className="n">{stats.skipped}</div><div className="l">Missing</div></div>
-          <div className="stat"><div className="n">{looked}</div><div className="l">History</div></div>
-        </div>
-        <TransportControls paused={paused} idle={stats.queued + stats.active === 0} pausedItems={stats.paused || 0} />
+        <button
+          type="button"
+          className="folder-link"
+          disabled={!isElectron || !downloadPath}
+          onClick={() => ipc.invoke('open-path', downloadPath)}
+          title={downloadPath ? `Open ${downloadPath}` : 'No download folder set'}
+        >
+          <Icon name="folder" size={15} />
+          <span className="truncate">{downloadPath || 'No folder set'}</span>
+        </button>
       </div>
     </aside>
-  );
-}
-
-// A disabled Pause is a control that answers a question nobody asked. With
-// nothing running - and nothing held back by a pause - say so instead.
-function TransportControls({ paused, idle, pausedItems = 0 }) {
-  const c = getController();
-  const retrying = c.keepTrying && !c.retryStopped && c.stats.skipped > 0;
-  if (idle && !paused && !retrying && pausedItems === 0) {
-    return <div className="transport-idle">No downloads in progress</div>;
-  }
-  const resumeAllPaused = () => {
-    const items = c.getItems?.() || [];
-    for (const item of items) {
-      if (item.status === 'paused') c.resumeItem?.(item.id);
-    }
-    if (paused) c.resume();
-  };
-  return (
-    <div className="transport-stack">
-      {(!idle || paused || retrying) && (
-        <div className="row-actions">
-          <button
-            className="btn btn-sm"
-            style={{ flex: 1 }}
-            onClick={() => (paused ? c.resume() : c.pause())}
-          >
-            {paused ? '▶ Resume' : '❚❚ Pause'}
-          </button>
-          <button className="btn btn-sm btn-danger" onClick={() => c.cancelAll()}>Cancel all</button>
-        </div>
-      )}
-      {pausedItems > 0 && (
-        <button
-          className="btn btn-sm btn-resume"
-          style={{ width: '100%' }}
-          onClick={resumeAllPaused}
-          title="Resume all individually paused tracks"
-        >
-          ▶ Resume {pausedItems} paused
-        </button>
-      )}
-    </div>
   );
 }

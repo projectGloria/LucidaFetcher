@@ -2,7 +2,7 @@
 import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
 import RenderBoundary from '../src/ui/components/RenderBoundary.jsx';
-import DownloadDock from '../src/ui/components/DownloadDock.jsx';
+import TransportBar from '../src/ui/components/TransportBar.jsx';
 import { initEngine } from '../src/ui/engine.js';
 
 const c = await initEngine({ config: {}, log() {} });
@@ -23,7 +23,7 @@ function Fragile() {
 }
 
 const root = createRoot(document.getElementById('root'));
-const render = () => root.render(<><RenderBoundary><Fragile /></RenderBoundary><DownloadDock /></>);
+const render = () => root.render(<><RenderBoundary><Fragile /></RenderBoundary><TransportBar /></>);
 flushSync(render);
 window.runUIRegression = () => {
   const check = (condition, message) => { if (!condition) throw new Error(message); };
@@ -33,13 +33,13 @@ window.runUIRegression = () => {
     flushSync(() => { progressVersion++; progress.forEach(fn => fn()); });
   }
   check(reads === before, 'Progress expanded all 10001 playlist rows again: ' + reads);
-  check(document.querySelector('.dock-pct').textContent === '90%', 'Progress stopped updating');
+  check(document.querySelector('.transfer-pct').textContent === '90%', 'Progress stopped updating');
   rec.status = 'ready';
   flushSync(() => { version++; structural.forEach(fn => fn()); });
-  check(document.querySelector('.dock-pct').textContent === 'Ready', 'Structural change was cached incorrectly');
+  check(document.querySelector('.transfer-pct').textContent === 'Ready', 'Structural change was cached incorrectly');
   broken = true; flushSync(render);
   check(document.querySelector('[role="alert"]')?.textContent.includes('fixture render failure'), 'Rendering failure left a blank window');
-  check(!!document.querySelector('.dock'), 'Rendering failure removed the transfer display');
+  check(!!document.querySelector('.transport'), 'Rendering failure removed the transfer display');
   broken = false;
   flushSync(() => document.querySelector('[role="alert"] button').click());
   check(!document.querySelector('[role="alert"]') && document.body.textContent.includes('Interface restored'), 'Interface recovery failed');
