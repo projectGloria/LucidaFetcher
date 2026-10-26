@@ -155,6 +155,10 @@ export async function syncProfileLibrary(profileDir, snapshot, { validateFile, s
               break;
             } catch (error) {
               if (error.code !== 'EEXIST') throw error;
+              if (n === 0 && (!claimed.has(target.toLowerCase()) || claimed.get(target.toLowerCase()) === key)
+                  && await validateFile(target, track.bytes, track)) {
+                break;
+              }
             } finally { release(); }
           }
         }

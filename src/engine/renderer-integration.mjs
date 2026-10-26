@@ -67,7 +67,53 @@ export function startEngine(opts) {
     keepTrying,
     awaitTransfer: (itemId, signal) => tracker.await(itemId, signal),
     cancelTransfer: (itemId) => ipc.cancelDownload(itemId),
+    checkExisting: typeof ipcRenderer.invoke === 'function'
+      ? (item) => ipcRenderer.invoke('downloads-check', [{
+        key: item.key, folderName: item.folderName, title: item.title,
+        artist: item.artist, durationSec: item.durationSec, isrc: item.isrc,
+      }], { scan: true }).then((res) => res?.[0] || null).catch(() => null)
+      : null,
   });
+
+  controller.recheckExisting = async () => {
+    if (controller.restoring || typeof ipcRenderer.invoke !== 'function') return 0;
+    const pending = [
+      ...[...controller.items.values()].filter((r) => r.status !== 'completed' && r.status !== 'cancelled'),
+      ...[...controller.tracks.values()].filter((r) => r.status !== 'completed' && r.status !== 'cancelled'),
+    ];
+    if (!pending.length) return 0;
+    const checks = await ipcRenderer.invoke('downloads-check', pending.map((r) => ({
+      key: r.item.key, folderName: r.item.folderName, title: r.item.title,
+      artist: r.item.artist, durationSec: r.item.durationSec, isrc: r.item.isrc,
+    })), { scan: true }).catch(() => []) || [];
+    let found = 0;
+    pending.forEach((rec, i) => {
+      const hit = checks[i];
+      if (!hit || !hit.done || rec.status === 'completed' || rec.status === 'cancelled') return;
+      found++;
+      const targetId = rec.item.id;
+      controller.pool.cancel(targetId);
+      controller._abortTransfer(targetId);
+      rec.transferService = hit.service || rec.transferService || null;
+      rec.file = hit.file || rec.file || null;
+      rec.savePath = hit.savePath || rec.savePath || null;
+      rec.bytes = hit.bytes || rec.bytes || null;
+      rec.receivedBytes = rec.bytes || 0;
+      rec.totalBytes = rec.bytes || 0;
+      rec.progress = 1;
+      rec.result = {
+        outcome: 'completed',
+        file: rec.file,
+        savePath: rec.savePath,
+        bytes: rec.bytes,
+        service: rec.transferService,
+      };
+      rec.status = 'completed';
+      rec.statusText = 'Downloaded';
+    });
+    if (found) controller._emit();
+    return found;
+  };
 
   // Transfer state comes from the main process, not from the chain loop - which
   // between the click and the finished file is just awaiting one promise.

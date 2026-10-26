@@ -100,6 +100,7 @@ export class Controller {
     // worker is no longer waiting for it.
     this.awaitTransfer = opts.awaitTransfer || null;
     this.cancelTransfer = opts.cancelTransfer || null;
+    this.checkExisting = opts.checkExisting || null;
     // How many transfers may run DETACHED from a slot. Past this, a chain waits
     // for its own file inline, which both bounds the transfers in flight and
     // stops the queue racing ahead of the network.
@@ -532,6 +533,27 @@ export class Controller {
         }
         if (!existing.firstPlaylistId && firstPlaylistForKey.has(key)) {
           existing.firstPlaylistId = firstPlaylistForKey.get(key);
+        }
+        const nowDownloaded = meta.status === 'downloaded' || meta.status === COMPLETED;
+        if (nowDownloaded && existing.status !== COMPLETED) {
+          this.pool.cancel(key);
+          this._abortTransfer(key);
+          existing.transferService = meta.transferService || meta.downloadService || existing.transferService || null;
+          existing.file = meta.file || existing.file || null;
+          existing.savePath = meta.savePath || existing.savePath || null;
+          existing.bytes = meta.bytes || existing.bytes || null;
+          existing.receivedBytes = existing.bytes || 0;
+          existing.totalBytes = existing.bytes || 0;
+          existing.progress = 1;
+          existing.result = {
+            outcome: 'completed',
+            file: existing.file,
+            savePath: existing.savePath,
+            bytes: existing.bytes,
+            service: existing.transferService,
+          };
+          existing.status = COMPLETED;
+          existing.statusText = 'Downloaded';
         }
         continue;
       }
@@ -1467,6 +1489,34 @@ export class Controller {
       const from = rec.resumeIndex;
       rec.resumeIndex = null;
       return this._walkChain(rec, item, slot, signal, from);
+    }
+
+    if (this.checkExisting) {
+      const existing = await Promise.resolve(this.checkExisting(item)).catch(() => null);
+      if (signal?.aborted || this._getRecord(item.id) !== rec) {
+        if (rec._preempted) { rec._preempted = false; return; }
+        if (this._getRecord(item.id) === rec && rec.status !== PAUSED) this._set(rec, CANCELLED, 'Cancelled');
+        return;
+      }
+      if (existing && existing.done) {
+        rec.transferService = existing.service || rec.transferService || null;
+        rec.file = existing.file || rec.file || null;
+        rec.savePath = existing.savePath || rec.savePath || null;
+        rec.bytes = existing.bytes || rec.bytes || null;
+        rec.receivedBytes = rec.bytes || 0;
+        rec.totalBytes = rec.bytes || 0;
+        rec.progress = 1;
+        rec.result = {
+          outcome: 'completed',
+          file: rec.file,
+          savePath: rec.savePath,
+          bytes: rec.bytes,
+          service: rec.transferService,
+        };
+        this.log('done', { id: item.id, name: item.name, via: existing.via || 'existing' });
+        this._set(rec, COMPLETED, 'Downloaded');
+        return;
+      }
     }
 
     rec.plan = buildPlan({

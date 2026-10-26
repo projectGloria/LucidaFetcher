@@ -355,7 +355,7 @@ const TRANSFERS_FILE = path.join(STATE_DIR, 'transfers.json');
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 const DEFAULT_CONFIG = {
-  downloadPath: null, speedLimitKBps: 0, scanFolderForExisting: false,
+  downloadPath: null, speedLimitKBps: 0, scanFolderForExisting: true,
   // Transfers allowed to keep running after the page that started them has
   // moved on to the next search. 0 = a page waits for its own file. A worker
   // waiting at this cap can detach as soon as any existing transfer completes.
@@ -598,6 +598,7 @@ ipcMain.handle('transfer-resume', (event, itemId) => {
 function loadState() {
   try { fs.mkdirSync(CACHE_DIR, { recursive: true }); } catch (e) { /* reported on first write */ }
   config = Object.assign({}, DEFAULT_CONFIG, readJson(CONFIG_FILE, {}));
+  if (config.scanFolderForExisting === false) config.scanFolderForExisting = true;
   downloadPath = config.downloadPath || app.getPath('downloads');
   manifest = readJson(MANIFEST_FILE, {}) || {};
   transfers = readJson(TRANSFERS_FILE, {}) || {};
@@ -1036,8 +1037,10 @@ function checkDownloaded(q, names = null, scan = false) {
   for (const candidate of names) {
     const f = candidate.file;
     const have = candidate.tokens;
-    const savePath = path.join(folderFor(q.folderName), f);
-    if (!pendingPath(savePath) && (want === have.join(' ') || reversed === have.join(' '))) return { done: true, file: f, savePath, via: 'scan' };
+    const savePath = candidate.savePath || path.join(folderFor(q.folderName), f);
+    if (!pendingPath(savePath) && (want === have.join(' ') || reversed === have.join(' '))) {
+      return { done: true, file: f, savePath, bytes: candidate.bytes || null, via: 'scan' };
+    }
   }
   return { done: false };
 }
@@ -1054,24 +1057,120 @@ async function isFlacFileAsync(file) {
   finally { if (handle) await handle.close().catch(() => {}); }
 }
 
-// Folder scans are opt-in for imports. Restart recovery uses recorded lengths
-// and transfer records because a partial FLAC already has valid format magic.
+let scanEnginesPromise = null;
+function getScanEngines() {
+  if (!scanEnginesPromise) {
+    scanEnginesPromise = Promise.all([
+      import('./src/engine/flac-identity.mjs'),
+      import('./src/engine/matching.mjs'),
+    ]).then(([flac, matching]) => ({ ...flac, ...matching }));
+  }
+  return scanEnginesPromise;
+}
+
+// Recursively scan downloadPath (and any target folders) for valid, complete
+// FLAC files with embedded artwork so existing tracks in any subfolder are not
+// downloaded a second time.
+let activeFolderScan = null;
+function scanDownloadFolders(extraDirs = []) {
+  if (activeFolderScan) return activeFolderScan;
+  const run = (async () => {
+    const { readFlacIdentity } = await getScanEngines();
+    const protectedPaths = new Set(Object.values(transfers).filter(t => t?.savePath).map(t => savePathKey(t.savePath)));
+    const visited = new Set();
+    const queue = [path.resolve(downloadPath), ...extraDirs.map(d => path.resolve(d))];
+    const entries = [];
+    while (queue.length) {
+      const dir = queue.shift();
+      const dKey = savePathKey(dir);
+      if (visited.has(dKey)) continue;
+      visited.add(dKey);
+      let dirEntries;
+      try { dirEntries = await fs.promises.readdir(dir, { withFileTypes: true }); }
+      catch { continue; }
+      for (const ent of dirEntries) {
+        const full = path.join(dir, ent.name);
+        if (ent.isDirectory()) {
+          queue.push(full);
+        } else if (ent.isFile() && AUDIO_EXT.test(ent.name)) {
+          const fKey = savePathKey(full);
+          if (!protectedPaths.has(fKey) && !liveSavePaths.has(fKey)) {
+            entries.push({ file: ent.name, dir, dirKey: dKey, savePath: full, key: fKey });
+          }
+        }
+      }
+    }
+    const hasDupSuffix = name => /(?:\s+\(\d+\)|\s+\[[0-9a-f]{6,10}\])+$/i.test(path.parse(name).name);
+    entries.sort((a, b) => (Number(hasDupSuffix(a.file)) - Number(hasDupSuffix(b.file))) || a.file.localeCompare(b.file));
+
+    // Large libraries used to open every file at once, exhausting handles
+    // and reporting valid downloads as missing when open failed with EMFILE.
+    const flacs = [];
+    for (let start = 0; start < entries.length; start += 16) {
+      const batch = await Promise.all(entries.slice(start, start + 16).map(async (entry) => {
+        const { savePath: file, key } = entry;
+        if (protectedPaths.has(key) || liveSavePaths.has(key)) return null;
+        let stat;
+        try { stat = await fs.promises.stat(file); } catch { return null; }
+        const stamp = `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+        const prev = flacIdentityCache.get(key);
+        const record = (prev && prev.stamp === stamp && typeof prev.valid === 'boolean')
+          ? prev
+          : await (async () => {
+            const valid = await isFlacFileAsync(file) && isCompleteFlacFile(file) && hasEmbeddedArtwork(file);
+            const next = valid
+              ? { stamp, valid: true, identity: readFlacIdentity(file) }
+              : { stamp, valid: false, identity: null };
+            flacIdentityCache.set(key, next);
+            if (next.identity) {
+              next.identity.catch(() => { if (flacIdentityCache.get(key) === next) flacIdentityCache.delete(key); });
+            }
+            while (flacIdentityCache.size > 4000) flacIdentityCache.delete(flacIdentityCache.keys().next().value);
+            return next;
+          })();
+        if (!record.valid) return null;
+        const identity = record.identity ? await record.identity.catch(() => null) : null;
+        const cleanBase = path.parse(entry.file).name.replace(/(?:\s+\(\d+\)|\s+\[[0-9a-f]{6,10}\])+$/i, '');
+        return {
+          file: entry.file,
+          dir: entry.dir,
+          dirKey: entry.dirKey,
+          savePath: file,
+          bytes: stat.size,
+          cleanBase,
+          tokens: normTokens(cleanBase),
+          identity,
+        };
+      }));
+      flacs.push(...batch.filter(Boolean));
+    }
+    return flacs;
+  })();
+  activeFolderScan = run;
+  return run.finally(() => { if (activeFolderScan === run) activeFolderScan = null; });
+}
+
+// Restart recovery uses recorded lengths and transfer records because a
+// partial FLAC already has valid format magic. All other checks scan the
+// download directory and its subfolders for existing completed FLACs.
 ipcMain.handle('downloads-check', async (event, list, opts) => {
   const checks = list || [];
   // Startup must use durable completions or interrupted-transfer records. An
   // untracked, truncated audio file cannot be proven complete by a folder scan.
-  const scan = !opts?.restore && (!!opts?.scan || config.scanFolderForExisting);
+  const scan = !opts?.restore && opts?.scan !== false && (opts?.scan !== undefined ? !!opts.scan : config.scanFolderForExisting !== false);
   const results = checks.map((q) => checkDownloaded(q));
-  const validated = async () => {
-    for (let start = 0; start < checks.length; start += 8) {
-      const batch = await Promise.all(checks.slice(start, start + 8).map(async (q, offset) => {
-        const result = results[start + offset];
+  const validateIndexes = async (indexes) => {
+    for (let start = 0; start < indexes.length; start += 8) {
+      const slice = indexes.slice(start, start + 8);
+      const batch = await Promise.all(slice.map(async (index) => {
+        const q = checks[index];
+        const result = results[index];
         if (!result.done || !q?.title || !result.savePath) return result;
         const identity = await checkDownloadIdentity(result.savePath, q).catch(() => ({ ok: false }));
         return identity.ok ? result : { done: false, reason: 'track-identity' };
       }));
       batch.forEach((result, offset) => {
-        const index = start + offset, q = checks[index], previous = results[index];
+        const index = slice[offset], q = checks[index], previous = results[index];
         if (result.reason === 'track-identity' && q.key && manifest[q.key]?.savePath === previous.savePath) {
           delete manifest[q.key]; saveManifest();
         }
@@ -1080,47 +1179,55 @@ ipcMain.handle('downloads-check', async (event, list, opts) => {
     }
     return results;
   };
-  if (!scan) return validated();
+  await validateIndexes(checks.map((_, i) => i));
+  if (!scan) return results;
 
-  // The folder scan below costs one synchronous open per FLAC file in every
-  // folder it touches, so it runs only for the tracks the manifest could not
-  // answer. Completed records avoid re-reading every file in the folder.
+  // The folder scan runs only for the tracks the manifest could not answer.
   const wanted = [];
   checks.forEach((q, i) => {
     if (q && !results[i].done && q.title && q.artist) wanted.push(i);
   });
-  if (!wanted.length) return validated();
+  if (!wanted.length) return results;
 
-  // Album/profile batches contain many tracks in the same folder. Read and
-  // tokenize that directory once instead of doing the same synchronous scan for
-  // every track in the batch.
-  const folders = new Map();
+  const extraDirs = [...new Set(wanted.map(i => folderFor(checks[i].folderName)))];
+  const allFlacs = await scanDownloadFolders(extraDirs);
+  const { compareFlacIdentity, score, isAcceptable } = await getScanEngines();
+  const pendingPath = file => Object.values(transfers).some(t => t?.savePath && savePathKey(t.savePath) === savePathKey(file));
+
   for (const i of wanted) {
-    const dir = folderFor(checks[i].folderName);
-    if (!folders.has(dir)) folders.set(dir, null);
-  }
-  for (const [dir] of folders) {
-    try {
-      const names = await fs.promises.readdir(dir);
-      const candidates = names.filter((f) => AUDIO_EXT.test(f));
-      // Large libraries used to open every file at once, exhausting handles
-      // and reporting valid downloads as missing when open failed with EMFILE.
-      const flacs = [];
-      for (let start = 0; start < candidates.length; start += 16) {
-        flacs.push(...(await Promise.all(candidates.slice(start, start + 16).map(async (f) => {
-        const file = path.join(dir, f);
-        const ok = await isFlacFileAsync(file) && isCompleteFlacFile(file) && hasEmbeddedArtwork(file);
-        return ok ? { file: f, tokens: normTokens(path.parse(f).name.replace(/ \(\d+\)$/, '')) } : null;
-        }))).filter(Boolean));
-      }
-      folders.set(dir, flacs);
-    } catch (e) {
-      folders.set(dir, []);
+    const q = checks[i];
+    const targetDirKey = savePathKey(folderFor(q.folderName));
+    const inTarget = [];
+    const inOther = [];
+    for (const c of allFlacs) {
+      if (pendingPath(c.savePath)) continue;
+      if (c.identity && !compareFlacIdentity(c.identity, q).ok) continue;
+      if (c.dirKey === targetDirKey) inTarget.push(c);
+      else inOther.push(c);
     }
+    const ordered = [...inTarget, ...inOther];
+    let match = checkDownloaded(q, ordered, true);
+    if (!match.done) {
+      for (const c of ordered) {
+        if (c.identity && c.identity.title && c.identity.artist && compareFlacIdentity(c.identity, q).ok) {
+          match = { done: true, file: c.file, savePath: c.savePath, bytes: c.bytes, via: 'scan' };
+          break;
+        }
+        const sep = c.cleanBase.indexOf(' - ');
+        if (sep > 0) {
+          const fileArtist = c.cleanBase.slice(0, sep).trim();
+          const fileTitle = c.cleanBase.slice(sep + 3).trim();
+          if (fileArtist && fileTitle && isAcceptable(score(q, fileTitle, fileArtist, c.identity?.durationSec))) {
+            match = { done: true, file: c.file, savePath: c.savePath, bytes: c.bytes, via: 'scan' };
+            break;
+          }
+        }
+      }
+    }
+    results[i] = match;
   }
-  for (const i of wanted) {
-    results[i] = checkDownloaded(checks[i], folders.get(folderFor(checks[i].folderName)), true);
-  }
+
+  await validateIndexes(wanted);
 
   // A scan hit is a guess the manifest should not have to make twice. Backfill
   // it as a real entry so the NEXT launch (or the next check of this same
@@ -1128,19 +1235,22 @@ ipcMain.handle('downloads-check', async (event, list, opts) => {
   let backfilled = false;
   results.forEach((res, i) => {
     const q = checks[i];
-    if (res.via !== 'scan' || !q || !q.key || manifest[q.key]) return;
-    const savePath = path.join(folderFor(q.folderName), res.file);
-    let bytes = null;
-    try { bytes = fs.statSync(savePath).size; } catch (e) { /* stat failed, keep null */ }
-    manifest[q.key] = { file: res.file, savePath, bytes, at: new Date().toISOString(),
-      service: null, format: path.extname(res.file).slice(1), sourceUrl: null, mediaUrl: null, licenseUrl: null };
+    if (!res.done || res.via !== 'scan' || !q) return;
+    const savePath = res.savePath || path.join(folderFor(q.folderName), res.file);
+    let bytes = res.bytes || null;
+    if (!bytes) {
+      try { bytes = fs.statSync(savePath).size; } catch (e) { /* stat failed, keep null */ }
+    }
     res.savePath = savePath;
     res.bytes = bytes;
+    if (!q.key || manifest[q.key]) return;
+    manifest[q.key] = { file: res.file, savePath, bytes, at: new Date().toISOString(),
+      service: null, format: path.extname(res.file).slice(1), sourceUrl: null, mediaUrl: null, licenseUrl: null };
     backfilled = true;
   });
   if (backfilled) saveManifest();
 
-  return validated();
+  return results;
 });
 
 // ---------------------------------------------------------------------------

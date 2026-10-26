@@ -85,7 +85,11 @@ export default function SettingsView({ config, setConfig, onToast, throttleOff =
   const pickFolder = async () => {
     if (!isElectron) return;
     const dir = await ipc.invoke('select-directory');
-    if (dir) { patch({ downloadPath: dir }); onToast('Download folder updated.'); }
+    if (dir) {
+      patch({ downloadPath: dir });
+      getController()?.recheckExisting?.();
+      onToast('Download folder updated.');
+    }
   };
 
   const toggleService = (sv) => {

@@ -210,3 +210,97 @@ test('single-track links import Spotify metadata with a canonical embed URL and 
   assert.equal(classifyInput('https://evil.test/open.spotify.com/track/abc').kind, 'link');
   assert.equal(classifyInput('https://evil.test/open.spotify.com/user/abc').kind, 'unknown');
 });
+
+test('downloads-check scans all subfolders recursively and addProfile/checkExisting skip tracks already on disk', async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'lucida-subfolder-scan-'));
+  try {
+    const subA = path.join(temp, 'Nihil', 'Casual');
+    const subB = path.join(temp, 'Nihil', '-');
+    fs.mkdirSync(subA, { recursive: true });
+    fs.mkdirSync(subB, { recursive: true });
+    // Build a valid FLAC with STREAMINFO (0), PICTURE (6, last), and an audio frame (0xff 0xf8)
+    const flac = Buffer.alloc(60);
+    flac.write('fLaC', 0, 'ascii');
+    flac[4] = 0x00; flac.writeUIntBE(34, 5, 3); flac.writeUInt16BE(4096, 8);
+    // 44100 Hz, 2 channels, 16 bps, 441000 samples (10s)
+    const packed = (44100n << 44n) | (1n << 41n) | (15n << 36n) | 441000n;
+    flac.writeBigUInt64BE(packed, 18);
+    flac[42] = 0x86; flac.writeUIntBE(4, 43, 3); // PICTURE block (last=1, type=6, len=4)
+    flac[50] = 0xff; flac[51] = 0xf8;
+
+    const prodigyClean = path.join(subA, 'The Prodigy - Smack My Bitch Up.flac');
+    const prodigyDup = path.join(subA, 'The Prodigy - Smack My Bitch Up (1).flac');
+    const grimesFile = path.join(subA, 'Grimes - Welcome To The Opera.flac');
+    fs.writeFileSync(prodigyClean, flac);
+    fs.writeFileSync(prodigyDup, flac);
+    fs.writeFileSync(grimesFile, flac);
+
+    const flacMod = await import('../src/engine/flac-identity.mjs');
+    const matchingMod = await import('../src/engine/matching.mjs');
+    let checkHandler;
+    const sandbox = {
+      fs, Buffer, path,
+      downloadPath: temp,
+      config: { scanFolderForExisting: true },
+      transfers: {},
+      manifest: {},
+      liveSavePaths: new Map(),
+      flacIdentityCache: new Map(),
+      saveManifest() {},
+      savePathKey: value => path.resolve(value).toLowerCase(),
+      ipcMain: { handle: (name, fn) => { if (name === 'downloads-check') checkHandler = fn; } },
+      checkDownloadIdentity: async () => ({ ok: true }),
+    };
+    vm.runInNewContext(excerpt('function isFlacFile(', 'const mediaTransfers ='), sandbox);
+    vm.runInNewContext(excerpt('const AUDIO_EXT =', 'const REPORT_NAME ='), sandbox);
+    sandbox.getScanEngines = async () => ({ ...flacMod, ...matchingMod });
+
+    const results = await checkHandler(null, [
+      { key: 'spotify:prodigy', folderName: 'Nihil/-', title: 'Smack My Bitch Up', artist: 'The Prodigy', durationSec: 10 },
+      { key: 'spotify:grimes', folderName: '', title: 'Welcome To The Opera (with Grimes)', artist: 'Anyma, Grimes', durationSec: 10 },
+      { key: 'spotify:missing', folderName: 'Nihil/Casual', title: 'Nonexistent Song', artist: 'The Prodigy', durationSec: 10 },
+    ], {});
+
+    assert.equal(results[0].done, true, 'finds track in sibling subfolder Nihil/Casual when checking Nihil/-');
+    assert.equal(results[0].file, 'The Prodigy - Smack My Bitch Up.flac', 'prefers clean filename over (1) duplicate');
+    assert.equal(results[0].savePath, prodigyClean);
+    assert.equal(results[0].bytes, flac.length);
+    assert.equal(sandbox.manifest['spotify:prodigy'].savePath, prodigyClean);
+
+    assert.equal(results[1].done, true, 'matches multi-artist / featured track against subfolder file');
+    assert.equal(results[1].savePath, grimesFile);
+    assert.equal(results[2].done, false, 'does not match missing song');
+
+    // Controller.addProfile upgrades an existing skipped track when re-imported as downloaded
+    let workerRuns = 0;
+    const c = new Controller({
+      services: ['qobuz'],
+      getWorker: () => ({ run: async () => { workerRuns++; return { outcome: 'no-match' }; } }),
+      checkExisting: async (item) => item.key === 'spotify:prodigy'
+        ? { done: true, file: path.basename(prodigyClean), savePath: prodigyClean, bytes: flac.length, via: 'scan' }
+        : { done: false },
+    });
+    c.pause();
+    c.addProfile({ id: 'nihil', folderName: 'Nihil' }, [{ id: 'pl1', name: 'Casual', trackKeys: ['spotify:grimes'] }], {
+      'spotify:grimes': { title: 'Welcome To The Opera', artist: 'Anyma, Grimes', status: 'skipped' },
+    });
+    assert.equal(c.getItem('spotify:grimes').status, 'skipped');
+    c.addProfile({ id: 'nihil', folderName: 'Nihil' }, [{ id: 'pl1', name: 'Casual', trackKeys: ['spotify:grimes'] }], {
+      'spotify:grimes': {
+        title: 'Welcome To The Opera', artist: 'Anyma, Grimes', status: 'downloaded',
+        file: path.basename(grimesFile), savePath: grimesFile, bytes: flac.length,
+      },
+    });
+    assert.equal(c.getItem('spotify:grimes').status, 'completed');
+    assert.equal(c.getItem('spotify:grimes').savePath, grimesFile);
+
+    // Controller._runChain checks checkExisting before running a worker
+    c.add({ id: 'loose-prodigy', key: 'spotify:prodigy', title: 'Smack My Bitch Up', artist: 'The Prodigy' });
+    c.resume();
+    await drain();
+    assert.equal(c.getItem('loose-prodigy').status, 'completed');
+    assert.equal(c.getItem('loose-prodigy').savePath, prodigyClean);
+    assert.equal(workerRuns, 0, 'worker never runs for a track already found on disk');
+    c.dispose();
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
+});
