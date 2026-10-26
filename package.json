@@ -1,7 +1,7 @@
 {
   "name": "lucidafetcher",
   "version": "1.0.0",
-  "description": "Fetches audio for a pasted playlist or track link.",
+  "description": "Fast, automated lossless FLAC audio fetcher and music library organizer for Windows with multi-source cascade scrapers, Vorbis tagging, and M3U8 export.",
   "main": "main.js",
   "scripts": {
     "test": "node --test test/*.test.mjs",
@@ -17,7 +17,21 @@
     "pack": "npm run icons && npm run build:ui && electron-builder --dir",
     "icons": "node scripts/make-icon.mjs"
   },
-  "keywords": [],
+  "keywords": [
+    "audio-downloader",
+    "deezer",
+    "desktop-app",
+    "electron",
+    "flac",
+    "lossless-audio",
+    "metadata-tagger",
+    "music-downloader",
+    "qobuz",
+    "react",
+    "spotify",
+    "tidal",
+    "windows"
+  ],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
