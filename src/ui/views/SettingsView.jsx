@@ -5,6 +5,7 @@ import { configureSounds, play } from '../sounds.js';
 import SourceIcon from '../components/SourceIcon.jsx';
 import Icon from '../components/Icon.jsx';
 import { SERVICE_LABELS } from '../../engine/status.mjs';
+import { normalizeApiUrl } from '../../engine/source-access.mjs';
 
 const ALL_SERVICES = ['qobuz', 'tidal', 'deezer', 'amazon', 'yandex', 'monochrome'];
 
@@ -14,6 +15,19 @@ export default function SettingsView({ config, setConfig, onToast, throttleOff =
   const [notes, setNotes] = useState('');
   const [withPrevious, setWithPrevious] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [apiDraft, setApiDraft] = useState(config.monochromeApiUrl || '');
+  const [apiError, setApiError] = useState('');
+  const commitApi = () => {
+    try {
+      const url = normalizeApiUrl(apiDraft);
+      setApiError('');
+      setApiDraft(url);
+      if (url === (local.monochromeApiUrl || '')) return;
+      getController()?.setMonochromeApiUrl?.(url);
+      patch({ monochromeApiUrl: url });
+      onToast('Monochrome backend updated for the next search.');
+    } catch (error) { setApiError(error.message); }
+  };
 
   const commitSpeed = () => {
     const trimmed = draftSpeed.trim();
@@ -140,8 +154,8 @@ export default function SettingsView({ config, setConfig, onToast, throttleOff =
                 <div className="setting-copy">
                   <label className="setting-title" htmlFor="conc">Simultaneous searches</label>
                   <span className="setting-desc">
-                    Each runs its own hidden browser page. 3 is the sweet spot; the sources are
-                    free community services and push back with rate limits.
+                    Each has a hidden browser page. Searches on the same site take turns,
+                    with shared pacing and cooldowns when the site limits requests.
                   </span>
                 </div>
                 <div className="setting-ctl range-ctl">
@@ -244,6 +258,20 @@ export default function SettingsView({ config, setConfig, onToast, throttleOff =
                     );
                   })}
                 </div>
+              </div>
+              <div className="setting-block">
+                <div className="setting-copy">
+                  <label className="setting-title" htmlFor="monochrome-api">Monochrome custom API</label>
+                  <span className="setting-desc">Optional compatible HiFi API you operate or have access to. Leave blank for Monochrome's default service. Its own limits still apply.</span>
+                </div>
+                <div className="path-ctl">
+                  <input id="monochrome-api" className="input" type="url" placeholder="http://127.0.0.1:8000"
+                    value={apiDraft} aria-invalid={!!apiError} aria-describedby={apiError ? 'monochrome-api-error' : undefined}
+                    onChange={e => setApiDraft(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') commitApi(); }} />
+                  <button className="btn" onClick={commitApi}>Apply</button>
+                </div>
+                {apiError && <span id="monochrome-api-error" className="setting-desc warn-text" role="alert">{apiError}</span>}
+                <span className="setting-desc">Lucida remembers working regions per provider automatically. Country selection does not change your connection's location.</span>
               </div>
             </div>
           </section>

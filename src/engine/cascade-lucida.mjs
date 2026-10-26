@@ -42,10 +42,17 @@ ${injectableScorer(expected, opts.minTitleScore ?? MIN_TITLE_SCORE)}
 
       const EMPTY_POLLS = ${emptyPolls};
       const FIND_POLLS = ${findPolls};
+      const triedCountries = ${JSON.stringify(opts.triedCountries || [])};
+      const managedNavigation = ${!!opts.managedNavigation};
       let empties = 0; // consecutive polls showing a rendered but empty result list
       let searchError = '';
 
       const attemptClick = () => {
+        const errorText = document.querySelector('.error, .alert-error')?.innerText || '';
+        if (/too many requests|rate[ -]?limit(?:ed| exceeded)?/i.test(errorText)) {
+          resolve({ outcome: 'rate-limited', message: errorText.trim() });
+          return true;
+        }
         // 1. On a search results page, pick the best-matching hit - never blindly
         //    the first, which is how a search for one track used to come back
         //    with a different one that the store happened to rank higher.
@@ -60,12 +67,12 @@ ${injectableScorer(expected, opts.minTitleScore ?? MIN_TITLE_SCORE)}
               const country = document.querySelector('select[name="country"]');
               if (!country || country.disabled || !country.options?.length) return false;
               const url = new URL(location.href);
-              const choice = Array.from(country.options).find(o => !o.disabled && o.value && o.value !== url.searchParams.get('country'));
+              const choice = Array.from(country.options).find(o => !o.disabled && o.value && o.value !== url.searchParams.get('country') && !triedCountries.includes(o.value));
               if (choice) {
                 url.searchParams.set('country', choice.value);
-                location.href = url.href;
-                resolve({ outcome: 'navigating', label: 'Search region: ' + choice.value });
-              } else resolve({ outcome: 'search-unavailable', message: errText.trim() });
+                if (!managedNavigation) location.href = url.href;
+                resolve({ outcome: 'navigating', label: 'Search region: ' + choice.value, country: choice.value, url: managedNavigation ? url.href : null });
+              } else resolve({ outcome: 'invalid-country', message: errText.trim() });
               return true;
             }
             if (/no results|nothing found|no tracks found/i.test(errText)) {
@@ -119,9 +126,9 @@ ${injectableScorer(expected, opts.minTitleScore ?? MIN_TITLE_SCORE)}
           // whole store.
           const alternates = scored.filter((c) => c.acceptable && c.href !== best.href)
                                    .slice(0, 3).map((c) => c.href);
-          location.href = best.href;
+          if (!managedNavigation) location.href = best.href;
           resolve({ outcome: 'navigating', label: best.title + ' - ' + best.artist,
-                    candidates, considered: scored.length, alternates });
+                    candidates, considered: scored.length, alternates, releaseUrl: best.href, url: managedNavigation ? best.href : null });
           return true;
         }
 
@@ -196,7 +203,7 @@ ${injectableScorer(expected, opts.minTitleScore ?? MIN_TITLE_SCORE)}
         if (attemptClick()) { clearInterval(interval); }
         else if (++polls > FIND_POLLS) {
           clearInterval(interval);
-          resolve(searchError ? { outcome: 'search-unavailable', message: searchError } : { outcome: 'timeout' });
+          resolve(searchError ? { outcome: 'invalid-country', message: searchError } : { outcome: 'timeout' });
         }
       }, 500);
     });

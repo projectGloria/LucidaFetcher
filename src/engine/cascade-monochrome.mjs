@@ -70,7 +70,7 @@ ${injectableScorer(expected, opts.minTitleScore ?? MIN_TITLE_SCORE)}
       };
       undo.push(() => { HTMLAnchorElement.prototype.click = nativeClick; });
 
-      const ERR = /couldn.?t download|could not find audio source|failed to download|no audio stream|not found on the provider|cannot be downloaded|failed to play/i;
+      const ERR = /too many requests|rate[ -]?limit|couldn.?t download|could not find audio source|failed to download|no audio stream|not found on the provider|cannot be downloaded|failed to play/i;
       const readError = (text) => {
         if (!ERR.test(text || '')) return null;
         const lines = String(text).split('\\n').map((l) => l.trim()).filter((l) => ERR.test(l));
@@ -165,7 +165,11 @@ ${injectableScorer(expected, opts.minTitleScore ?? MIN_TITLE_SCORE)}
             const waitTimer = setInterval(() => {
               spent++;
               const err = errorNotice();
-              if (err) { clearInterval(waitTimer); onFail(err); }
+              if (err) {
+                clearInterval(waitTimer);
+                if (/too many requests|rate[ -]?limit/i.test(err)) finish({ outcome: 'rate-limited', message: err });
+                else onFail(err);
+              }
               else if (spent > TOTAL_POLLS) { clearInterval(waitTimer); finish({ outcome: 'timeout', label: LABEL }); }
               else if (++polls > CANDIDATE_POLLS) { clearInterval(waitTimer); onFail(null); }
             }, 1000);

@@ -245,6 +245,13 @@ export class DownloadTracker {
 
 export function ipcAdapter(ipcRenderer, tracker) {
   return {
+    onSourceResponse(webContentsId, itemId, cb) {
+      const handler = (_event, response) => {
+        if (response?.webContentsId === webContentsId && response.itemId === itemId) cb(response);
+      };
+      ipcRenderer.on('source-response', handler);
+      return () => ipcRenderer.removeListener('source-response', handler);
+    },
     setDownloadContext(ctx) { ipcRenderer.send('set-next-download-folder', ctx); },
     clearDownloadContext(id) { ipcRenderer.send('clear-download-context', id); },
     awaitDownload(itemId, signal) { return tracker.await(itemId, signal); },

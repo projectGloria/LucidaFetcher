@@ -22,7 +22,7 @@ import { assignPlaylistFiles } from './profile-paths.mjs';
 // Kept next to the chain's own list in advanceAfter, which skips the rest of a
 // store's variants for the same reasons.
 const UNAVAILABLE_OUTCOMES = new Set([
-  'service-unavailable', 'search-unavailable', 'navigation-timeout',
+  'service-unavailable', 'search-unavailable', 'navigation-timeout', 'invalid-country',
 ]);
 
 export const QUEUED = 'queued';
@@ -163,7 +163,29 @@ export class Controller {
     return null;
   }
 
+  // Cache key for the derived views below. The version moves on every emit;
+  // the sizes cover a structural change that has not emitted yet, so a caller
+  // reading straight after add() never gets the previous list.
+  _cacheKey() {
+    return `${this._version}:${this.items.size}:${this.tracks.size}:${this.playlists.size}:${this.profiles.size}`;
+  }
+
+  /**
+   * Every row, one per playlist membership. Rebuilt at most once per version:
+   * on each emit it was being rebuilt four times (two renderer subscribers,
+   * QueueView and the transport bar), each pass copying every track's item
+   * into a fresh object - O(memberships) allocations, four times over, for
+   * every status change. Treat the returned array and records as read-only.
+   */
   getItems() {
+    const key = this._cacheKey();
+    if (this._itemsCache && this._itemsCache.key === key) return this._itemsCache.items;
+    const items = this._buildItems();
+    this._itemsCache = { key, items };
+    return items;
+  }
+
+  _buildItems() {
     const loose = [...this.items.values()];
     if (!this.playlists.size) return loose;
 
@@ -318,7 +340,18 @@ export class Controller {
   subscribeProgress(fn) { this._progressListeners.add(fn); return () => this._progressListeners.delete(fn); }
   getProgressSnapshot() { return this._progressVersion; }
 
+  // Five components read this per emit; one count serves them all. The retry
+  // check runs inside _emit after a status has changed but before the version
+  // moves, so it uses _countStats() directly and never sees a stale cache.
   get stats() {
+    const key = this._cacheKey();
+    if (this._statsCache && this._statsCache.key === key) return this._statsCache.stats;
+    const stats = this._countStats();
+    this._statsCache = { key, stats };
+    return stats;
+  }
+
+  _countStats() {
     let queued = 0, active = 0, ready = 0, completed = 0, skipped = 0, paused = 0, cancelled = 0;
     const allRecords = [...this.items.values(), ...this.tracks.values()];
     for (const r of allRecords) {
@@ -393,7 +426,7 @@ export class Controller {
       && this.services.some(service => DOWNLOAD_SERVICES.includes(service)) && this.pool.pending === 0 && this.pool.activeCount === 0
       && this.transfers.size === 0;
     if (!idle) return false;
-    const stats = this.stats;
+    const stats = this._countStats();
     return stats.active === 0 && stats.queued === 0 && stats.skipped > 0;
   }
 
@@ -1408,6 +1441,7 @@ export class Controller {
       rec.tried.push({
         service: step.service, outcome: res.outcome,
         label: res.label || null, message: res.message || null,
+        httpStatus: res.httpStatus || null, retryAt: res.retryAt || null,
         at: new Date().toISOString(),
       });
 
@@ -1614,13 +1648,18 @@ export class Controller {
         service: step.service, outcome: res.outcome,
         label: res.label || null, message: res.message || null,
         at: new Date().toISOString(),
+        httpStatus: res.httpStatus || null, retryAt: res.retryAt || null,
       });
 
       // What this attempt says about the STORE, as opposed to the track. Only
       // the outcomes that mean "this source could not be asked" retire it; a
       // confident "we do not have that" is the store working correctly and
       // must not take it out of the chain for everything behind this track.
-      if (UNAVAILABLE_OUTCOMES.has(res.outcome)) {
+      if (res.outcome === 'access-blocked') {
+        for (const service of this.services) {
+          if ((service === 'monochrome') === (step.source === 'monochrome')) this.markServiceUnhealthy(service);
+        }
+      } else if (UNAVAILABLE_OUTCOMES.has(res.outcome)) {
         this.markServiceUnhealthy(step.service);
         this.log('service.unhealthy', { service: step.service, outcome: res.outcome });
       } else {

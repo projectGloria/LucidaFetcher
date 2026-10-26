@@ -19,6 +19,69 @@ const archiveArg = process.argv.indexOf('--archive');
 const packageArchive = archiveArg >= 0 ? path.resolve(process.argv[archiveArg + 1]) : path.join(root, 'release/win-unpacked/resources/app.asar');
 const stateRoot = path.join(sandbox, packaged ? 'userData' : '');
 
+async function probeSourceResponses(baseUrl) {
+  const ipc = window.require('electron').ipcRenderer;
+  const view = document.createElement('webview');
+  view.setAttribute('src', 'about:blank');
+  const ready = new Promise(resolve => view.addEventListener('dom-ready', resolve, { once: true }));
+  document.body.appendChild(view);
+  await ready;
+  const webContentsId = view.getWebContentsId();
+  try {
+    for (const status of [429, 403]) {
+      const itemId = 'response-probe-' + status;
+      ipc.send('set-next-download-folder', { webContentsId, itemId, sourceUrl: baseUrl, service: 'qobuz' });
+      await ipc.invoke('get-config'); // IPC barrier before navigation
+      const loaded = new Promise(resolve => view.addEventListener('dom-ready', resolve, { once: true }));
+      const response = await new Promise((resolve, reject) => {
+        const handler = (_event, value) => {
+          if (value.itemId !== itemId) return;
+          clearTimeout(timer);
+          ipc.removeListener('source-response', handler);
+          resolve(value);
+        };
+        const timer = setTimeout(() => { ipc.removeListener('source-response', handler); reject(new Error('No source response for ' + status)); }, 4000);
+        ipc.on('source-response', handler);
+        view.setAttribute('src', baseUrl + '/http-' + status);
+      });
+      if (response.status !== status || !response.mainFrame || (status === 429 && response.retryAfter !== '2')) {
+        throw new Error('Incorrect source response: ' + JSON.stringify(response));
+      }
+      // Headers arrive before the page commits. Starting the next navigation
+      // immediately can abort both Chromium loads and invalidate this probe.
+      await loaded;
+    }
+  } finally {
+    ipc.send('clear-download-context', webContentsId);
+    view.remove();
+  }
+}
+
+async function checkCustomBackend() {
+  const input = document.getElementById('monochrome-api');
+  if (!input) throw new Error('Custom Monochrome API setting missing');
+  const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+  const apply = input.parentElement.querySelector('button');
+  const update = async value => {
+    set.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    apply.click();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    return window.require('electron').ipcRenderer.invoke('get-config');
+  };
+  let saved = await update('http://127.0.0.1:8000/');
+  if (saved.monochromeApiUrl !== 'http://127.0.0.1:8000') throw new Error('Custom backend was not saved');
+  saved = await update('file:///invalid');
+  if (saved.monochromeApiUrl !== 'http://127.0.0.1:8000' || !document.getElementById('monochrome-api-error')) {
+    throw new Error('Invalid custom backend replaced the working setting');
+  }
+  saved = await update('');
+  if (saved.monochromeApiUrl !== '' || document.getElementById('monochrome-api-error')) throw new Error('Custom backend was not cleared');
+  const pane = document.querySelector('.main .pane');
+  pane.scrollTop += input.getBoundingClientRect().top - pane.getBoundingClientRect().top - 100;
+}
+
 function run(executable, args) {
   return new Promise((resolve, reject) => {
     const env = { ...process.env };
@@ -275,6 +338,11 @@ try {
     let sawPaused = false, sawResumed = false;
     const server = http.createServer((req, res) => {
       const url = new URL(req.url, 'http://localhost');
+      if (url.pathname === '/http-429' || url.pathname === '/http-403') {
+        const status = Number(url.pathname.slice(6));
+        res.writeHead(status, { 'Content-Type': 'text/html', 'Retry-After': '2', 'Cache-Control': 'no-store' });
+        res.end('Source response fixture'); return;
+      }
       if (url.pathname === '/wrong.flac') {
         const wrong = fs.readFileSync(path.join(__dirname, 'wrong.flac'));
         res.writeHead(200, { 'Content-Type': 'audio/flac', 'Content-Disposition': 'attachment; filename="wrong.flac"', 'Content-Length': wrong.length });
@@ -329,6 +397,7 @@ try {
             '(async () => { [...document.querySelectorAll(".nav-item")].find(button => button.textContent.includes("Settings")).click(); await new Promise(resolve => setTimeout(resolve, 50)); const label = [...document.querySelectorAll("label.switch")].find(label => label.textContent.includes("Keep trying")); if (!label) throw new Error("Keep trying option missing"); label.querySelector("input").click(); const config = await window.require("electron").ipcRenderer.invoke("get-config"); return config.keepTrying; })()'
           );
           if (!keepTryingSaved) throw new Error('Keep trying setting was not saved');
+          await win.webContents.executeJavaScript('(' + ${JSON.stringify(probeSourceResponses.toString())} + ')(' + JSON.stringify('http://127.0.0.1:' + port) + ')');
           // Exercise label focus through trusted mouse input. input.click()
           // toggles the value without focusing the absolutely positioned input
           // and missed a document scroll that moved the entire UI off screen.
@@ -353,6 +422,10 @@ try {
           await win.webContents.capturePage();
           await new Promise(resolve => setTimeout(resolve, 150));
           await win.webContents.capturePage().then(image => fs.writeFileSync(path.join(__dirname, 'settings.png'), image.toPNG()));
+          await win.webContents.executeJavaScript(${JSON.stringify('(' + checkCustomBackend.toString() + ')()')});
+          await win.webContents.capturePage();
+          await new Promise(resolve => setTimeout(resolve, 150));
+          await win.webContents.capturePage().then(image => fs.writeFileSync(path.join(__dirname, 'source-settings.png'), image.toPNG()));
           await win.webContents.executeJavaScript(${JSON.stringify('(' + checkLinkPreview.toString() + ')()')});
           await win.webContents.executeJavaScript(${JSON.stringify('(' + checkNavigation.toString() + ')(false)')});
           const reloaded = new Promise(resolve => win.webContents.once('did-finish-load', resolve));
@@ -410,6 +483,7 @@ try {
           if (!uiRegression.recovered || uiRegression.extraExpansions) throw new Error('UI regressions failed');
           fixtureWindow.destroy();
           console.log('PASS: React render recovery preserves queue; 80 progress ticks across 10001 rows caused no full-list rebuilds');
+          console.log('PASS: real HTTP 429/Retry-After and 403 source observations; custom Monochrome backend validation, save and reset');
           console.log('PASS: download expansion and filter survive navigation and reload; filtered collapse preserves hidden choices; recent profiles reopen cached playlists without a search; restored source is Qobuz rather than Spotify metadata');
           console.log('PASS: ${packaged ? 'packaged archive' : 'source'}, built UI, trusted sound-label clicks keep the shell onscreen, sound toggle, bounded volume writes, audio device failures, invalid link preview, saved preferences, real cascades, automatic retry, wrong remix rejected, three FLAC downloads, actual filenames, byte integrity, oversized artwork retained, audio frames unchanged, shared profile copies, distinct playlist folders and PNG covers, live pause/resume, disposal and clean quit');
           clearTimeout(deadline); server.close(); app.quit();

@@ -340,6 +340,21 @@ test('debounce flush waits for a write that has already started', async () => {
   assert.equal(flushed, true);
 });
 
+test('debounce still writes under a steady stream of calls (maxWait)', async () => {
+  const sandbox = { setTimeout, clearTimeout, Promise };
+  vm.runInNewContext(excerpt('function debounced(', 'const saveManifest ='), sandbox);
+  let writes = 0;
+  const save = sandbox.debounced(() => { writes++; }, 40, 120);
+  // A call every 20ms would reset a plain 40ms trailing debounce for ever.
+  const started = Date.now();
+  while (Date.now() - started < 300) {
+    save();
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  save.cancel();
+  assert.ok(writes >= 2, `expected periodic writes, got ${writes}`);
+});
+
 test('response limits stop chunked bodies before buffering the entire response', async () => {
   let cancelled = false, reads = 0, released = false;
   const sandbox = { Buffer };

@@ -50,6 +50,18 @@ export function advanceAfter(plan, index, outcome) {
   const step = plan[index];
   if (!step) return plan.length;
   switch (outcome) {
+    case 'rate-limited':
+    case 'access-blocked':
+      // All Lucida stores use the same host; changing store cannot clear its limit.
+      for (let i = index + 1; i < plan.length; i++) {
+        if (plan[i].source !== step.source) return i;
+      }
+      return plan.length;
+    case 'invalid-country':
+      for (let i = index + 1; i < plan.length; i++) {
+        if (plan[i].service !== step.service) return i;
+      }
+      return plan.length;
     case 'no-results':
     case 'no-match':
       return index + 1; // try the next variant, then the next store

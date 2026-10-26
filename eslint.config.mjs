@@ -80,7 +80,7 @@ export default [
 
   // The main process: CommonJS on Node.
   {
-    files: ['main.js'],
+    files: ['main.js', 'src/engine/**/*.cjs'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'commonjs',

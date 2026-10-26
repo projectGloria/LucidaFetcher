@@ -82,7 +82,11 @@ function useTransferRates(active) {
  * so nothing ever overlaps the content.
  */
 export default function TransportBar({ onToast }) {
-  useTransferProgress();
+  // No byte subscription here. It used to sit on this component, re-rendering
+  // the whole bar (buttons, stats, panel) on every progress tick - 250ms per
+  // transfer, ~24 renders a second with six running. Only NowPlaying and
+  // TransferRow draw bytes, so they subscribe themselves; speeds arrive via
+  // useTransferRates, which already commits at most every SAMPLE_MS.
   const items = useItems();
   const stats = useStats();
   const paused = usePaused();
@@ -158,10 +162,15 @@ export default function TransportBar({ onToast }) {
       <div className="transport-now">
         {lead ? (
           <NowPlaying rec={lead} speed={rates.get(lead.item.id)} />
+        ) : stats.active > 0 && !paused ? (
+          // Searches in flight, nothing transferring yet. Deliberately blank:
+          // the sidebar's "Now working" list shows which tracks and where, and
+          // falling through to the lines below would claim "All finished" or
+          // "N queued" while work is plainly running.
+          null
         ) : (
           <span className="t-idle">
             {paused ? 'Paused'
-              : stats.active > 0 ? `Searching ${stats.active} track${stats.active === 1 ? '' : 's'}…`
               : retrying ? 'Waiting to retry missing tracks'
               : total === 0 ? 'Nothing queued'
               : stats.queued > 0 ? `${stats.queued} queued`
@@ -266,6 +275,7 @@ function Art({ rec, className }) {
 }
 
 function NowPlaying({ rec, speed }) {
+  useTransferProgress(); // byte ticks: rec is the live record (or reads it through getters), so a re-render picks up new bytes
   const isReady = rec.status === 'ready';
   const pct = pctOf(rec);
   return (
@@ -284,6 +294,7 @@ function NowPlaying({ rec, speed }) {
 }
 
 function TransferRow({ rec, speed }) {
+  useTransferProgress(); // byte ticks: rec is the live record (or reads it through getters), so a re-render picks up new bytes
   const isReady = rec.status === 'ready';
   const pct = pctOf(rec);
   const size = fmtBytes(rec.totalBytes);

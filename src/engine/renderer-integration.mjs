@@ -11,6 +11,8 @@ import { viewAdapter, ipcAdapter, DownloadTracker, ensureWorkerViews } from './e
 import { collectProfiles, reportPayload, profileSignature } from './profile-report.mjs';
 import { assignPlaylistFiles } from './profile-paths.mjs';
 import { buildSearchVariants } from './variants.mjs';
+import { SourceAccess, normalizeApiUrl } from './source-access.mjs';
+import { describeStep } from './status.mjs';
 
 export const DEFAULT_CONCURRENCY = 3;
 // How many finished-searching tracks may be in flight without holding a
@@ -49,12 +51,25 @@ export function startEngine(opts) {
 
   const tracker = new DownloadTracker(ipcRenderer);
   const ipc = ipcAdapter(ipcRenderer, tracker);
+  let monochromeApiUrl = '';
+  try { monochromeApiUrl = normalizeApiUrl(opts.monochromeApiUrl); }
+  catch (error) { log('source.config.error', { message: error.message }); }
+  const access = new SourceAccess({ regions: opts.sourceRegions, cooldowns: opts.sourceCooldowns,
+    onChange: patch => ipcRenderer.send('set-config', patch) });
+  const accessDeps = { access, getMonochromeApiUrl: () => monochromeApiUrl,
+    onWait: (itemId, step, ms, limited) => {
+      const rec = controller.getItem(itemId);
+      if (!rec || rec.status !== 'searching') return;
+      rec.statusText = ms == null ? 'Waiting for a source browser'
+        : limited ? `Source rate limit — retrying in ${Math.ceil(ms / 1000)}s` : describeStep(step, rec.plan);
+      controller._emit();
+    } };
 
   // One webview per slot, created up front. Building them lazily would put a
   // page load on the critical path of the first download in each slot.
   const views = ensureWorkerViews(container, concurrency);
   const workers = views.map((view, slot) => new Worker({
-    slot, view: viewAdapter(view), ipc, log, pipeline,
+    slot, view: viewAdapter(view), ipc, log, pipeline, ...accessDeps,
   }));
 
   const controller = new Controller({
@@ -74,6 +89,7 @@ export function startEngine(opts) {
       }], { scan: true }).then((res) => res?.[0] || null).catch(() => null)
       : null,
   });
+  controller.setMonochromeApiUrl = value => { monochromeApiUrl = normalizeApiUrl(value); };
 
   controller.recheckExisting = async () => {
     if (controller.restoring || typeof ipcRenderer.invoke !== 'function') return 0;
@@ -299,7 +315,7 @@ export function startEngine(opts) {
     const want = Math.max(1, n | 0);
     const all = ensureWorkerViews(container, Math.max(want, workers.length));
     for (let i = workers.length; i < want; i++) {
-      workers[i] = new Worker({ slot: i, view: viewAdapter(all[i]), ipc, log, pipeline });
+      workers[i] = new Worker({ slot: i, view: viewAdapter(all[i]), ipc, log, pipeline, ...accessDeps });
     }
     baseSetConcurrency(want);
   };

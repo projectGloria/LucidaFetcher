@@ -75,11 +75,29 @@ test('an invalid region with no alternative is unavailable, not missing', async 
   page.document.querySelector = selector => selector === 'select[name="country"]'
     ? { options: [{ value: 'NL' }] } : query(selector);
   const r = await runScript(buildLucidaScript(FETISH, fast), page);
-  assert.equal(r.outcome, 'search-unavailable');
+  assert.equal(r.outcome, 'invalid-country');
 });
 
 test('calls a rendered but empty result list empty', () => run(FETISH, { results: [] })
   .then((r) => assert.equal(r.outcome, 'no-results')));
+
+test('country fallback never revisits a failed region and lets the worker pace navigation', async () => {
+  const page = makeLucidaPage({ href: 'https://lucida.to/search?query=x&country=US', error: 'Invalid country' });
+  const query = page.document.querySelector;
+  page.document.querySelector = selector => selector === 'select[name="country"]'
+    ? { options: [{ value: 'NL' }, { value: 'US' }, { value: 'DE' }] } : query(selector);
+  const result = await runScript(buildLucidaScript(FETISH, { ...fast, managedNavigation: true, triedCountries: ['NL'] }), page);
+  assert.equal(result.country, 'DE');
+  assert.match(result.url, /country=DE/);
+  assert.match(page.location.href, /country=US/);
+  const exhausted = await runScript(buildLucidaScript(FETISH, { ...fast, triedCountries: ['NL', 'DE'] }), page);
+  assert.equal(exhausted.outcome, 'invalid-country');
+});
+
+test('explicit rate-limit messages are distinct from generic backend and country errors', async () => {
+  const result = await run(FETISH, { error: 'Too many requests. Please try later.' });
+  assert.equal(result.outcome, 'rate-limited');
+});
 
 test('presses the download button on a release page', () => run(FETISH, {
   href: 'https://lucida.to/a/right', downloadControl: 'button',

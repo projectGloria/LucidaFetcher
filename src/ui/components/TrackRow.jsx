@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import { getController, isElectron, ipc } from '../engine.js';
 import { serviceLabel } from '../../engine/status.mjs';
 import { displayedService } from '../../engine/source-display.mjs';
@@ -192,15 +192,38 @@ export default function TrackRow({
   );
 }
 
+// One shared 1Hz clock for every elapsed counter on screen. Each row used to
+// own its own setInterval, so N active rows meant N timers firing out of phase
+// and N separate renders a second; now it is one timer and one React batch,
+// and the timer only exists while at least one row is listening.
+const clockListeners = new Set();
+let clockNow = Date.now();
+let clockTimer = null;
+function subscribeClock(listener) {
+  clockListeners.add(listener);
+  if (!clockTimer) {
+    clockNow = Date.now();
+    clockTimer = setInterval(() => {
+      clockNow = Date.now();
+      for (const l of clockListeners) l();
+    }, 1000);
+  }
+  return () => {
+    clockListeners.delete(listener);
+    if (!clockListeners.size) { clearInterval(clockTimer); clockTimer = null; }
+  };
+}
+const getClock = () => clockNow;
+// Rows that are not timing anything subscribe to nothing, so an idle queue of
+// 300 tracks keeps no timer alive at all.
+const noSubscribe = () => () => {};
+
 /** Milliseconds since `startedAt`, ticking once a second while it is set. */
 function useElapsed(startedAt) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!startedAt) return undefined;
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, [startedAt]);
-  return startedAt ? now - startedAt : null;
+  const now = useSyncExternalStore(startedAt ? subscribeClock : noSubscribe, getClock);
+  // clockNow can be up to a second stale when this row starts timing, which
+  // would show a negative elapsed for one tick.
+  return startedAt ? Math.max(0, now - startedAt) : null;
 }
 
 /**

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker, urlForStep } from '../src/engine/worker.mjs';
+import { SourceAccess } from '../src/engine/source-access.mjs';
 
 const ITEM = { id: 't1', name: 'Obzkure - Fetish', title: 'Fetish', artist: 'Obzkure', folderName: 'KAN', key: 'k1' };
 const lucidaStep = { source: 'lucida', service: 'qobuz', query: 'Fetish Obzkure', variantIndex: 0 };
@@ -140,4 +141,107 @@ test('blocks all YouTube and SoundCloud paths before search or download', async 
       assert.deepEqual(view.navigated, []);
     }
   }
+});
+
+test('HTTP 429 interrupts a stalled page, persists a shared cooldown and releases listeners', async () => {
+  let receive, removed = 0, reset = 0;
+  const access = new SourceAccess({ intervalMs: 0 });
+  const view = { webContentsId: 7, navigate() { queueMicrotask(() => receive({ status: 429, host: 'lucida.to', retryAfter: '120' })); },
+    onDomReady() { return () => {}; }, reset() { reset++; } };
+  const ipc = fakeIpc({ onSourceResponse(_id, _item, cb) { receive = cb; return () => { removed++; }; } });
+  const result = await new Worker({ slot: 0, view, ipc, access }).run(ITEM, lucidaStep);
+  assert.equal(result.outcome, 'rate-limited');
+  assert.equal(result.httpStatus, 429);
+  assert.ok(access.cooldowns.lucida > Date.now() + 119000);
+  assert.equal(removed, 1);
+  assert.ok(reset > 0);
+  assert.equal(access.state('lucida').active, false);
+  assert.deepEqual(ipc.cleared, [7]);
+});
+
+test('cancelling a queued worker does not navigate or release the active worker', async () => {
+  const access = new SourceAccess({ intervalMs: 0 });
+  const release = await access.acquire('lucida');
+  const view = fakeView([]), abort = new AbortController();
+  const worker = new Worker({ slot: 0, view, ipc: fakeIpc(), access });
+  const waiting = worker.run(ITEM, lucidaStep, abort.signal);
+  abort.abort();
+  await assert.rejects(waiting, { name: 'Aborted' });
+  assert.deepEqual(view.navigated, []);
+  assert.equal(access.state('lucida').active, true);
+  release();
+});
+
+test('successful region fallback is reused and cached releases avoid repeat searches', async () => {
+  const access = new SourceAccess({ intervalMs: 0 });
+  const view = fakeView([
+    { outcome: 'navigating', country: 'NL' },
+    { outcome: 'navigating', releaseUrl: 'https://lucida.to/release/1' },
+    { outcome: 'clicked-download-button' },
+    { outcome: 'clicked-download-button' },
+    { outcome: 'no-results' },
+  ]);
+  const worker = new Worker({ slot: 0, view, ipc: fakeIpc(), access });
+  await worker.run(ITEM, lucidaStep);
+  assert.equal(access.regions.qobuz, 'NL');
+  await worker.run(ITEM, lucidaStep);
+  assert.equal(view.navigated[1], 'https://lucida.to/release/1');
+  await worker.run({ ...ITEM, title: 'Another song' }, lucidaStep);
+  assert.match(view.navigated[2], /country=NL/);
+});
+
+test('a stale cached release is evicted and retried through search once', async () => {
+  const access = new SourceAccess({ intervalMs: 0 });
+  access.rememberRelease(access.cacheKey(ITEM, lucidaStep), 'https://lucida.to/stale');
+  const view = fakeView([{ outcome: 'no-download-control' }, { outcome: 'no-results' }]);
+  const result = await new Worker({ slot: 0, view, ipc: fakeIpc(), access }).run(ITEM, lucidaStep);
+  assert.equal(result.outcome, 'no-results');
+  assert.equal(view.navigated.length, 2);
+  assert.match(view.navigated[1], /\/search\?/);
+  assert.equal(access.getRelease(access.cacheKey(ITEM, lucidaStep)), null);
+});
+
+test('a 403 page is reported as blocked without manufacturing a rate limit', async () => {
+  let receive;
+  const access = new SourceAccess({ intervalMs: 0 });
+  const view = { webContentsId: 7, navigate() { queueMicrotask(() => receive({ status: 403, host: 'lucida.to', mainFrame: true })); },
+    onDomReady() { return () => {}; }, reset() {} };
+  const ipc = fakeIpc({ onSourceResponse(_id, _item, cb) { receive = cb; return () => {}; } });
+  const result = await new Worker({ slot: 0, view, ipc, access }).run(ITEM, lucidaStep);
+  assert.equal(result.outcome, 'access-blocked');
+  assert.equal(access.cooldowns.lucida, undefined);
+});
+
+test('Monochrome endpoint changes are coordinated across workers sharing browser storage', async () => {
+  const access = new SourceAccess({ intervalMs: 0 });
+  let endpoint = 'http://127.0.0.1:8000';
+  const configured = [];
+  function makeWorker(slot) {
+    const view = fakeView([]);
+    view.executeJavaScript = async script => {
+      if (script.includes('dev-mode-enabled')) { configured.push(endpoint); return true; }
+      return { outcome: 'no-results' };
+    };
+    return new Worker({ slot, view, ipc: fakeIpc(), access, getMonochromeApiUrl: () => endpoint });
+  }
+  const first = makeWorker(0), second = makeWorker(1);
+  await first.run(ITEM, monoStep);
+  endpoint = 'http://127.0.0.1:9000';
+  await second.run(ITEM, monoStep);
+  endpoint = 'http://127.0.0.1:8000';
+  await first.run(ITEM, monoStep);
+  endpoint = '';
+  await second.run(ITEM, monoStep);
+  assert.deepEqual(configured, ['http://127.0.0.1:8000', 'http://127.0.0.1:9000', 'http://127.0.0.1:8000', '']);
+});
+
+test('cancelling Monochrome configuration releases its shared source slot', async () => {
+  const access = new SourceAccess({ intervalMs: 0 }), abort = new AbortController();
+  const view = fakeView([]);
+  view.executeJavaScript = () => { queueMicrotask(() => abort.abort()); return new Promise(() => {}); };
+  const ipc = fakeIpc();
+  const worker = new Worker({ slot: 0, view, ipc, access, getMonochromeApiUrl: () => 'http://127.0.0.1:8000' });
+  await assert.rejects(worker.run(ITEM, monoStep, abort.signal), { name: 'Aborted' });
+  assert.equal(access.state('monochrome').active, false);
+  assert.deepEqual(ipc.cleared, [7]);
 });

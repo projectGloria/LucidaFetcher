@@ -54,6 +54,9 @@ async function initializeEngine({ config, log }) {
       // moved on. 0 restores the old wait-for-your-own-file behaviour.
       maxTransfers: config.maxTransfers == null ? 6 : config.maxTransfers,
       keepTrying: !!config.keepTrying,
+      sourceRegions: config.sourceRegions,
+      sourceCooldowns: config.sourceCooldowns,
+      monochromeApiUrl: config.monochromeApiUrl,
       log,
     });
   }
@@ -92,6 +95,11 @@ function makeScraper() {
           view.removeEventListener('dom-ready', onReady);
           view.removeEventListener('did-fail-load', onFail);
           clearTimeout(timer);
+          // Unload the page. Webviews run with backgroundThrottling off and are
+          // rendered (opacity .001), so open.spotify.com left in here kept its
+          // whole SPA running at full rate for the rest of the session. The
+          // workers reset after every attempt; this view never did.
+          view.setAttribute('src', 'about:blank');
           fn(arg);
         };
         const onReady = async () => {
@@ -185,6 +193,12 @@ export function usePaused() {
  */
 export function useGroups() {
   const items = useItems();
+  // Memoized on the item list so the groups keep their identity between
+  // renders that did not change the queue (a parent re-render, a toggle).
+  return useMemo(() => buildGroups(items), [items]);
+}
+
+function buildGroups(items) {
   const groups = new Map();
   for (const rec of items) {
     const key = rec.item.groupId || '__loose__';
@@ -218,6 +232,10 @@ export function useGroups() {
  */
 export function useProfileTree() {
   const groups = useGroups();
+  return useMemo(() => buildProfileTree(groups), [groups]);
+}
+
+function buildProfileTree(groups) {
   const out = [];
   const seen = new Map();
   for (const g of groups) {

@@ -59,7 +59,10 @@ export function describeOutcome(outcome, ctx = {}) {
     case 'injection-failed': return `Lost the connection to the ${service} page`;
     case 'no-download-control': return `${service} offered no download option for this track`;
     case 'direct-failed': return `Could not fetch the ${service} upload directly${ctx.message ? ` (${ctx.message})` : ''}`;
-    case 'search-unavailable': return `Could not search ${service} — it is rate-limiting or unavailable right now`;
+    case 'rate-limited': return `${service} is limiting requests — retry after the cooldown`;
+    case 'access-blocked': return `${service} denied access (HTTP 403)`;
+    case 'invalid-country': return `${service} rejected the available search regions`;
+    case 'search-unavailable': return `Could not search ${service}${ctx.message ? ` — ${ctx.message}` : ' — the source is unavailable'}`;
     case 'error': return `${service} failed: ${ctx.message || 'unknown error'}`;
     default: return `${service}: ${outcome}`;
   }
@@ -68,6 +71,8 @@ export function describeOutcome(outcome, ctx = {}) {
 /** Why a track was abandoned, given everything that was tried. */
 export function describeAbandon(tried = []) {
   if (!tried.length) return 'Nothing was tried — no search query could be built';
+  const specific = tried.find(t => ['rate-limited', 'access-blocked', 'invalid-country'].includes(t.outcome));
+  if (specific) return describeOutcome(specific.outcome, specific);
   const providerFailed = tried.filter((t) => t.outcome === 'provider-failed');
   const nothingHadIt = tried.every((t) => t.outcome === 'no-results' || t.outcome === 'no-match');
 
@@ -77,7 +82,7 @@ export function describeAbandon(tried = []) {
   const unreachable = tried.filter((t) => t.outcome === 'search-unavailable' || t.outcome === 'navigation-timeout');
   if (unreachable.length) {
     const names = [...new Set(unreachable.map((t) => serviceLabel(t.service)))].join(', ');
-    return `Could not reach ${names} (rate-limited or down) — worth retrying later`;
+    return `Could not search ${names} — the source failed or did not respond; retry later`;
   }
 
   if (nothingHadIt) {

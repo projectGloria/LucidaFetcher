@@ -11,6 +11,7 @@
 import { buildLucidaScript } from './cascade-lucida.mjs';
 import { buildMonochromeScript } from './cascade-monochrome.mjs';
 import { SOURCE_MONOCHROME, SOURCE_SOUNDCLOUD, SOURCE_YOUTUBE, SOURCE_DIRECT } from './chain.mjs';
+import { monochromeConfigScript } from './source-access.mjs';
 
 export const DEFAULTS = {
   domReadyTimeoutMs: 45000,
@@ -29,8 +30,8 @@ export const DEFAULTS = {
 // the better bet.
 export const MAX_ALTERNATE_HOPS = 2;
 
-export function lucidaSearchUrl(query, service) {
-  return `https://lucida.to/search?query=${encodeURIComponent(query)}&service=${service}`;
+export function lucidaSearchUrl(query, service, country) {
+  return `https://lucida.to/search?query=${encodeURIComponent(query)}&service=${service}${country ? '&country=' + encodeURIComponent(country) : ''}`;
 }
 
 export function monochromeSearchUrl(query) {
@@ -92,6 +93,9 @@ export class Worker {
     this.view = deps.view;
     this.ipc = deps.ipc;
     this.log = deps.log || (() => {});
+    this.access = deps.access;
+    this.onWait = deps.onWait || (() => {});
+    this.getMonochromeApiUrl = deps.getMonochromeApiUrl;
     // With the pipeline on, a scraped attempt ends when the transfer STARTS,
     // not when the file lands: the page has done its job by then and the bytes
     // are the main process's business. The caller waits for the file instead,
@@ -115,21 +119,55 @@ export class Worker {
     };
     signal?.addEventListener("abort", cancel, { once: true });
 
+    let release, offResponse;
+    const attempt = new AbortController();
+    const abortAttempt = () => attempt.abort();
+    signal?.addEventListener('abort', abortAttempt, { once: true });
+    const source = this.access?.key(step);
     try {
-      const result = await this._dispatch(item, step, signal);
+      if (this.access) {
+        this.onWait(item.id, step, null, false);
+        release = await this.access.acquire(source, signal);
+        await this.access.pace(source, signal, (ms, limited) => this.onWait(item.id, step, ms, limited));
+      }
+      this.onWait(item.id, step, 0, false);
+      if (signal?.aborted) throw new Aborted();
+      let networkResult;
+      offResponse = this.ipc.onSourceResponse?.(this.view.webContentsId, item.id, response => {
+        if (networkResult) return;
+        if (response.status !== 429 && !(response.status === 403 && response.mainFrame)) return;
+        const retryAt = response.status === 429 ? this.access?.limited(source, response.retryAfter) : null;
+        networkResult = { outcome: response.status === 429 ? 'rate-limited' : 'access-blocked',
+          httpStatus: response.status, retryAt, message: `HTTP ${response.status} from ${response.host}` };
+        attempt.abort();
+        this.view.reset?.();
+      });
+      let result;
+      try { result = await this._dispatch(item, step, attempt.signal); }
+      catch (error) { if (!networkResult) throw error; }
+      result = networkResult || result;
+      if (result.outcome === 'rate-limited' && !networkResult) {
+        result.retryAt = this.access?.limited(source, result.retryAfter);
+      }
+      if (result.outcome === 'completed' || result.outcome === 'transferring') this.access?.healthy(source);
+      else if (this.access) this.access.cache.delete(this.access.cacheKey(item, step));
       this.log('attempt.outcome', {
         id: item.id, name: item.name, service: step.service,
         outcome: result.outcome, label: result.label || null,
         message: result.message || null, url: result.url || null,
         candidates: result.candidates || null,
+        httpStatus: result.httpStatus || null, retryAt: result.retryAt || null,
         ms: Date.now() - started,
       });
       return { ...base, ...result };
     } catch (err) {
-      if (err instanceof Aborted) throw err;
+      if (err instanceof Aborted || err.name === 'Aborted' || signal?.aborted) throw new Aborted();
       this.log('attempt.error', { id: item.id, service: step.service, message: err.message });
       return { ...base, outcome: 'error', message: err.message };
     } finally {
+      offResponse?.();
+      release?.();
+      signal?.removeEventListener('abort', abortAttempt);
       signal?.removeEventListener('abort', cancel);
     }
   }
@@ -143,8 +181,12 @@ export class Worker {
   }
 
   async _runScraped(item, step, signal) {
-    const url = urlForStep(step);
     const isMono = step.source === SOURCE_MONOCHROME;
+    const searchUrl = isMono ? urlForStep(step) : lucidaSearchUrl(step.query, step.service, this.access?.regions[step.service]);
+    const cacheKey = this.access?.cacheKey(item, step);
+    const cached = !isMono && this.access?.getRelease(cacheKey);
+    const url = cached || searchUrl;
+    const endpoint = isMono ? this.getMonochromeApiUrl?.() : '';
 
     // The context must be registered BEFORE navigation: the page can trigger a
     // download the instant it loads, and will-download reads this map.
@@ -163,10 +205,34 @@ export class Worker {
       attemptService: step.service,
       originalService: item.originalService || step.service,
       sourceUrl: url,
+      apiUrl: endpoint || '',
     });
 
     try {
-      const outcome = await this._navigateAndInject(item, step, url, isMono, signal);
+      const configuredEndpoint = this.access ? this.access.monochromeEndpoint : this._configuredEndpoint;
+      if (isMono && this.getMonochromeApiUrl && configuredEndpoint !== endpoint) {
+        // A same-origin text document has no app startup requests to race with
+        // the setting. The actual search page loads after configuration.
+        const ready = this._nextDomReady();
+        try {
+          this.view.navigate('https://monochrome.st/robots.txt');
+          if (await withTimeout(ready, this.t.domReadyTimeoutMs, () => null, signal) === null) {
+            return { outcome: 'navigation-timeout' };
+          }
+          const configured = await withTimeout(this.view.executeJavaScript(monochromeConfigScript(endpoint)),
+            this.t.domReadyTimeoutMs, () => false, signal);
+          if (configured !== true) return { outcome: 'error', message: 'Could not configure the Monochrome backend before the deadline' };
+          this._configuredEndpoint = endpoint;
+          if (this.access) this.access.monochromeEndpoint = endpoint;
+        } finally { ready.cancel(); }
+        await this.access?.pace(this.access.key(step), signal);
+      }
+      let outcome = await this._navigateAndInject(item, step, url, isMono, signal);
+      if (cached && !['download-triggered', 'rate-limited', 'access-blocked'].includes(outcome.outcome) && !/^clicked-/.test(outcome.outcome)) {
+        this.access.cache.delete(cacheKey);
+        await this.access.pace(this.access.key(step), signal);
+        outcome = await this._navigateAndInject(item, step, searchUrl, isMono, signal);
+      }
       if (outcome.outcome !== 'download-triggered' &&
           !/^clicked-/.test(outcome.outcome)) {
         return outcome; // nothing is coming; leave the download context cleanup to finally
@@ -210,11 +276,14 @@ export class Worker {
     // fact about the PAGE rather than about the track - but nothing ever read
     // the field, so one dead release page wrote off the whole store.
     let alternates = [];
+    const triedCountries = [];
+    let selectedCountry = !isMono ? new URL(url).searchParams.get('country') : null;
+    let releaseUrl = !isMono && !new URL(url).pathname.startsWith('/search') ? url : null;
     let last = { outcome: 'navigation-exhausted' };
 
     try {
       this.view.navigate(url);
-      for (let hop = 0; hop < 3 + MAX_ALTERNATE_HOPS; hop++) {
+      for (let hop = 0; hop < 6 + MAX_ALTERNATE_HOPS; hop++) {
         if (signal && signal.aborted) throw new Aborted();
         const arrived = await withTimeout(ready, this.t.domReadyTimeoutMs, () => null, signal);
         // Only the FIRST page failing to arrive says the store is unreachable.
@@ -228,16 +297,35 @@ export class Worker {
         ready.cancel();
         ready = this._nextDomReady();
 
-        const res = await this._inject(build(expected, {}), cascadeMs, signal);
+        const res = await this._inject(build(expected, { managedNavigation: true, triedCountries }), cascadeMs, signal);
         const outcome = (res && typeof res === 'object') ? res : { outcome: String(res) };
 
-        // 'navigating' means the page moved itself to the release page; loop
-        // round and run the cascade again there. No navigate() - it already went.
+        // Current scripts return the next URL so shared pacing happens before
+        // navigation. Older scripts may already have moved the page themselves.
         if (outcome.outcome === 'navigating') {
+          if (outcome.country) {
+            if (selectedCountry) triedCountries.push(selectedCountry);
+            triedCountries.push(outcome.country);
+            selectedCountry = outcome.country;
+            this.access?.forgetRegion(step.service);
+          }
+          if (outcome.releaseUrl) {
+            releaseUrl = outcome.releaseUrl;
+            if (selectedCountry) this.access?.rememberRegion(step.service, selectedCountry);
+          }
           if (Array.isArray(outcome.alternates)) alternates = outcome.alternates.slice();
+          if (outcome.url) {
+            await this.access?.pace(this.access.key(step), signal, (ms, limited) => this.onWait(item.id, step, ms, limited));
+            this.view.navigate(outcome.url);
+          }
           continue;
         }
-        if (outcome.outcome === 'download-triggered' || /^clicked-/.test(outcome.outcome)) return outcome;
+        if (outcome.outcome === 'download-triggered' || /^clicked-/.test(outcome.outcome)) {
+          if (releaseUrl) this.access?.rememberRelease(this.access.cacheKey(item, step), releaseUrl);
+          return outcome;
+        }
+        if (outcome.outcome === 'invalid-country') this.access?.forgetRegion(step.service);
+        if (['rate-limited', 'access-blocked', 'invalid-country'].includes(outcome.outcome)) return outcome;
 
         // A release page that yielded nothing. Try the next hit the search was
         // willing to accept before giving the store up.
@@ -249,9 +337,11 @@ export class Worker {
         });
         ready.cancel();
         ready = this._nextDomReady();
+        await this.access?.pace(this.access.key(step), signal, (ms, limited) => this.onWait(item.id, step, ms, limited));
+        releaseUrl = href;
         this.view.navigate(href);
       }
-      return last;
+      return triedCountries.length && !releaseUrl ? { outcome: 'invalid-country', message: 'No working region found within the bounded retry budget' } : last;
     } finally {
       // Whatever happened, this attempt's listener must not outlive it.
       ready.cancel();

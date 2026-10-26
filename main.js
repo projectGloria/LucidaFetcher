@@ -297,7 +297,32 @@ app.on('web-contents-created', (event, contents) => {
 
   contents.on('unresponsive', () => logEvent('page.unresponsive', tag()));
   contents.on('responsive', () => logEvent('page.responsive', tag()));
+
+  // ---- motion -------------------------------------------------------------
+  //
+  // Every webview is a full third-party page that is rendered (opacity .001)
+  // with background throttling off - deliberately, the cascades need it live.
+  // That also means its spinners, carousels and ad animations run at the
+  // display's refresh rate for nobody: the bulk of the app's CPU mid-fetch.
+  // Collapsing durations (rather than `animation: none`) keeps animationend /
+  // transitionend firing, so page code that waits on them still advances, and
+  // iteration-count 1 stops infinite loops from re-ticking every frame.
+  if (kind === 'webview') {
+    contents.on('dom-ready', () => {
+      contents.insertCSS(MOTION_KILL_CSS, { cssOrigin: 'user' })
+        .catch(() => { /* navigated away before the sheet landed; the next dom-ready retries */ });
+    });
+  }
 });
+
+const MOTION_KILL_CSS = `*, *::before, *::after {
+  animation-duration: 0.001ms !important;
+  animation-delay: 0s !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+  transition-delay: 0s !important;
+  scroll-behavior: auto !important;
+}`;
 
 // A scraped page that gets stuck in a render loop can emit the same warning
 // hundreds of times a SECOND (seen live: a lucida.to i18n check re-firing
@@ -362,6 +387,9 @@ const DEFAULT_CONFIG = {
   // Mirrors DEFAULT_MAX_TRANSFERS in src/engine/renderer-integration.mjs.
   maxTransfers: 6,
   keepTrying: false,
+  monochromeApiUrl: '',
+  sourceRegions: {},
+  sourceCooldowns: {},
   // Closing the window leaves the app running in the tray. On by default
   // because this is a long-running fetcher: closing the window while forty
   // playlists are still downloading should not throw the run away, and the
@@ -429,11 +457,19 @@ function writeJson(file, value, indent) {
 // Debounce with flush and cancel. State is written on every queue mutation, but a
 // pending write still has to land before the app quits (flush), and must not
 // resurrect a file the renderer has just cleared (cancel).
-function debounced(fn, ms) {
-  let timer = null, pending = null;
+//
+// maxWait bounds how long a steady stream of calls can postpone the write. A
+// plain trailing debounce starves: rememberTransfer calls saveTransfers every
+// 2s per transfer, so with 3-6 transfers the 800ms timer was reset every
+// 333-667ms and transfers.json could go unwritten for an entire run - a crash
+// then lost every resume record. Same failure the renderer's queue throttle
+// documents in attachPersistence.
+function debounced(fn, ms, maxWait = ms * 4) {
+  let timer = null, pending = null, firstAt = 0;
   let inFlight = Promise.resolve();
   const run = () => {
     timer = null;
+    firstAt = 0;
     if (pending) {
       const args = pending;
       pending = null;
@@ -443,11 +479,17 @@ function debounced(fn, ms) {
     }
     return inFlight;
   };
-  const d = function (...args) { pending = args; clearTimeout(timer); timer = setTimeout(run, ms); };
+  const d = function (...args) {
+    pending = args;
+    if (!firstAt) firstAt = Date.now();
+    clearTimeout(timer);
+    // Trailing by `ms`, but never later than firstAt + maxWait.
+    timer = setTimeout(run, Math.max(0, Math.min(ms, firstAt + maxWait - Date.now())));
+  };
   // flush() now returns the (possibly async) write's promise, so a caller like
   // window-all-closed can await it before the process actually quits.
   d.flush = () => { clearTimeout(timer); return run(); };
-  d.cancel = () => { clearTimeout(timer); timer = null; pending = null; };
+  d.cancel = () => { clearTimeout(timer); timer = null; pending = null; firstAt = 0; };
   return d;
 }
 
@@ -944,6 +986,27 @@ function hasEmbeddedArtwork(file) {
   finally { if (fd !== undefined) fs.closeSync(fd); }
 }
 
+// The same two checks, remembered per file by size+mtime+ctime. A profile sync
+// re-validates every downloaded file in the profile, and it runs on each track
+// that finishes - so a 3,000-track profile cost ~6,000 synchronous opens on this
+// event loop per completion, which is where the app's steady CPU went (and why
+// IPC stalled during long runs). An unchanged file now costs one async stat.
+const FLAC_CACHE_MAX = 20000;
+const flacValidCache = new Map(); // savePathKey -> { stamp, ok }
+async function validateFlacCached(file, bytes = 0) {
+  let st;
+  try { st = await fs.promises.stat(file); } catch { return false; }
+  if (!st.isFile() || (bytes > 0 && st.size !== bytes)) return false;
+  const key = savePathKey(file);
+  const stamp = `${st.size}:${st.mtimeMs}:${st.ctimeMs}`;
+  const hit = flacValidCache.get(key);
+  if (hit && hit.stamp === stamp) return hit.ok;
+  const ok = isCompleteFlacFile(file, bytes) && hasEmbeddedArtwork(file);
+  flacValidCache.set(key, { stamp, ok });
+  while (flacValidCache.size > FLAC_CACHE_MAX) flacValidCache.delete(flacValidCache.keys().next().value);
+  return ok;
+}
+
 const mediaTransfers = new Map();
 ipcMain.on('download-cancel-item', (event, itemId) => {
   for (const [id, ctx] of pendingContexts) if (ctx.itemId === itemId) pendingContexts.delete(id);
@@ -1125,7 +1188,7 @@ function scanDownloadFolders(extraDirs = []) {
             if (next.identity) {
               next.identity.catch(() => { if (flacIdentityCache.get(key) === next) flacIdentityCache.delete(key); });
             }
-            while (flacIdentityCache.size > 4000) flacIdentityCache.delete(flacIdentityCache.keys().next().value);
+            while (flacIdentityCache.size > FLAC_CACHE_MAX) flacIdentityCache.delete(flacIdentityCache.keys().next().value);
             return next;
           })();
         if (!record.valid) return null;
@@ -1136,6 +1199,7 @@ function scanDownloadFolders(extraDirs = []) {
           dir: entry.dir,
           dirKey: entry.dirKey,
           savePath: file,
+          key,
           bytes: stat.size,
           cleanBase,
           tokens: normTokens(cleanBase),
@@ -1148,6 +1212,29 @@ function scanDownloadFolders(extraDirs = []) {
   })();
   activeFolderScan = run;
   return run.finally(() => { if (activeFolderScan === run) activeFolderScan = null; });
+}
+
+// The scan above, reused for a while. downloads-check runs before EVERY track,
+// and each one used to walk and stat the whole library again - a 1,000-track
+// queue against 5,000 files was five million stats. What can appear in the
+// folder during a run is mostly our own downloads, and those are answered by
+// the manifest before the scan is consulted; the TTL bounds how long a file the
+// user drops in by hand goes unseen. Keyed by the root so a changed download
+// folder is never answered from the old one. Every folderFor() target lies
+// inside that root, so extraDirs adds nothing the walk did not already cover.
+const FOLDER_INDEX_TTL_MS = 60000;
+// The promise is cached, not the result: callers arriving mid-scan share it,
+// and nothing is written back after an await (so a folder change during a
+// scan cannot be overwritten by the stale one). A failed scan is not kept.
+let folderIndexCache = null; // { root, at, flacs: Promise }
+function folderIndex(extraDirs = []) {
+  const root = savePathKey(downloadPath);
+  const cached = folderIndexCache;
+  if (cached && cached.root === root && Date.now() - cached.at < FOLDER_INDEX_TTL_MS) return cached.flacs;
+  const entry = { root, at: Date.now(), flacs: scanDownloadFolders(extraDirs) };
+  folderIndexCache = entry;
+  entry.flacs.catch(() => { if (folderIndexCache === entry) folderIndexCache = null; });
+  return entry.flacs;
 }
 
 // Restart recovery uses recorded lengths and transfer records because a
@@ -1190,9 +1277,11 @@ ipcMain.handle('downloads-check', async (event, list, opts) => {
   if (!wanted.length) return results;
 
   const extraDirs = [...new Set(wanted.map(i => folderFor(checks[i].folderName)))];
-  const allFlacs = await scanDownloadFolders(extraDirs);
+  const allFlacs = await folderIndex(extraDirs);
   const { compareFlacIdentity, score, isAcceptable } = await getScanEngines();
-  const pendingPath = file => Object.values(transfers).some(t => t?.savePath && savePathKey(t.savePath) === savePathKey(file));
+  // Built once per call: the old per-candidate Object.values(transfers).some()
+  // re-resolved every transfer path for every file for every wanted track.
+  const pendingKeys = new Set(Object.values(transfers).filter(t => t?.savePath).map(t => savePathKey(t.savePath)));
 
   for (const i of wanted) {
     const q = checks[i];
@@ -1200,7 +1289,9 @@ ipcMain.handle('downloads-check', async (event, list, opts) => {
     const inTarget = [];
     const inOther = [];
     for (const c of allFlacs) {
-      if (pendingPath(c.savePath)) continue;
+      // The index can be up to FOLDER_INDEX_TTL_MS old, so a path that has
+      // since become a live or resumable transfer is filtered here, not there.
+      if (pendingKeys.has(c.key) || liveSavePaths.has(c.key)) continue;
       if (c.identity && !compareFlacIdentity(c.identity, q).ok) continue;
       if (c.dirKey === targetDirKey) inTarget.push(c);
       else inOther.push(c);
@@ -1434,7 +1525,7 @@ ipcMain.handle('profile-library-load', async (event, folderName) => {
     const { loadValidatedLibrary } = await getLibraryEngine();
     const dir = folderFor(folderName);
     return await loadValidatedLibrary(dir, async (file, bytes, track) =>
-      isCompleteFlacFile(file, bytes) && hasEmbeddedArtwork(file) &&
+      await validateFlacCached(file, bytes) &&
       !Object.values(transfers).some(t => t?.savePath && savePathKey(t.savePath) === savePathKey(file)) &&
       (await checkDownloadIdentity(file, track)).ok);
   } catch (err) {
@@ -1463,7 +1554,7 @@ ipcMain.on('profile-library-sync', (event, payload) => {
         pending.state = null;
         try {
           await syncProfileLibrary(profileDir, state, {
-            validateFile: (file, bytes) => isCompleteFlacFile(file, bytes) && hasEmbeddedArtwork(file),
+            validateFile: (file, bytes) => validateFlacCached(file, bytes),
             saveArtwork: (url, file) => { downloadArtwork(url, file); },
             sourceFolder: folderFor,
             reserveCopy: file => {
@@ -1993,6 +2084,10 @@ function downloadArtwork(url, artPath) {
   return pending;
 }
 
+// Shared with scanDownloadFolders. One cap for both writers: they used to trim
+// to 4000 and 2000, and since the scan visits files in the same order every
+// time, a library past either size missed on nearly every entry and re-parsed
+// most of its FLAC headers on every scan.
 const flacIdentityCache = new Map();
 async function checkDownloadIdentity(file, context) {
   const { readFlacIdentity, compareFlacIdentity } = await import('./src/engine/flac-identity.mjs');
@@ -2004,7 +2099,7 @@ async function checkDownloadIdentity(file, context) {
     cached = { stamp, identity: readFlacIdentity(file) };
     flacIdentityCache.set(key, cached);
     cached.identity.catch(() => { if (flacIdentityCache.get(key) === cached) flacIdentityCache.delete(key); });
-    while (flacIdentityCache.size > 2000) flacIdentityCache.delete(flacIdentityCache.keys().next().value);
+    while (flacIdentityCache.size > FLAC_CACHE_MAX) flacIdentityCache.delete(flacIdentityCache.keys().next().value);
   }
   return compareFlacIdentity(await cached.identity, context);
 }
@@ -2403,6 +2498,22 @@ function createTray() {
   }
 }
 
+// Caption buttons for the frameless window. `close` goes through
+// mainWindow.close() on purpose, not destroy(): the 'close' handler is what
+// decides between hide-to-tray and the flush-then-quit handshake, and a custom
+// X that skipped it would lose the queue snapshot.
+ipcMain.on('window-control', (event, action) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win || win.isDestroyed()) return;
+  if (action === 'minimize') win.minimize();
+  else if (action === 'toggle-maximize') { if (win.isMaximized()) win.unmaximize(); else win.maximize(); }
+  else if (action === 'close') win.close();
+});
+ipcMain.handle('window-state', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  return { maximized: !!(win && !win.isDestroyed() && win.isMaximized()) };
+});
+
 // The renderer owns the queue, so it is the only thing that can say what the
 // tray should read.
 ipcMain.on('engine-stats', (event, stats) => {
@@ -2418,6 +2529,11 @@ function createWindow() {
     minWidth: 900,
     minHeight: 560,
     show: false,
+    // The app draws its own title strip (TitleBar.jsx). `frame: false` drops the
+    // native caption bar; thickFrame (the Windows default) stays on, so the
+    // window keeps its resize border, drop shadow, Aero Snap and Win11 rounded
+    // corners - the parts of the native frame that are worth having.
+    frame: false,
     backgroundColor: '#0a0a0c', // must equal --bg in styles.css, or the window flashes a different black on launch
     webPreferences: {
       webviewTag: true,
@@ -2458,6 +2574,13 @@ function createWindow() {
 
   mainWindow.setMenu(null);
   mainWindow.once('ready-to-show', () => mainWindow.show());
+
+  // The renderer draws the maximize/restore glyph, so it has to hear about
+  // every change - including the ones it did not cause (Win+Up, Aero Snap, a
+  // double-click on the drag region, which Windows handles natively).
+  const sendWindowState = () => toUI('window-state', { maximized: mainWindow.isMaximized() });
+  mainWindow.on('maximize', sendWindowState);
+  mainWindow.on('unmaximize', sendWindowState);
 
   // Hide instead of close, unless the app is genuinely on its way out. The
   // `quitting` flag is already the app's answer to "is this a real exit?" - it
@@ -2675,6 +2798,11 @@ app.whenReady().then(() => {
   // app.on('activate') can call createWindow again and would otherwise
   // double-register this listener, doubling every download side effect.
   session.defaultSession.on('will-download', handleWillDownload);
+  const { installSourceObserver } = require('./src/engine/source-response.cjs');
+  installSourceObserver(session.defaultSession.webRequest, id => pendingContexts.get(id), response => {
+    logEvent('source.http.warn', response);
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('source-response', response);
+  });
 
   createWindow();
   createTray();

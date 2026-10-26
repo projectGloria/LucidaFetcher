@@ -64,6 +64,7 @@
       "src/engine/profile-paths.mjs",
       "src/engine/flac-identity.mjs",
       "src/engine/matching.mjs",
+      "src/engine/source-response.cjs",
       "dist/**/*",
       "build/icon.png",
       "build/tray.png",

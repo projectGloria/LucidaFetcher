@@ -1,5 +1,35 @@
 # Reliability audit — 2026-10-04
 
+## Source access — 2026-10-26
+
+- Workers share one active scrape per site, with at least two seconds between
+  worker-directed navigations. Lucida's five music services share this budget;
+  Monochrome has a separate budget. Downloads can still run concurrently.
+  Requests generated internally by a site's own JavaScript are not individually paced.
+- HTTP 429 responses from source pages/APIs preserve `Retry-After` (seconds or
+  an HTTP date). Without that header, cooldowns grow from 30 seconds to five
+  minutes. Deadlines persist in config and survive manual retries and restart.
+  A queued worker waits cancellably; the throttled attempt can try the other
+  enabled site. HTTP 403, invalid countries, and backend errors are distinct.
+- Country fallback uses Lucida's advertised options without revisiting failed
+  regions in the same attempt. Successful search regions are remembered per
+  provider. This selects a catalog region; it does not change the public IP.
+- Matching Lucida release pages are cached in memory for ten minutes (200
+  entries maximum). Cache keys include the service, query, and recording identity;
+  every cached visit re-runs matching, and stale pages fall back to search once.
+- Settings → Sources → Monochrome custom API accepts a compatible HTTP(S) HiFi
+  endpoint. Apply it for the next search, or clear it to restore the default.
+  The app configures Monochrome's `dev-mode-enabled` / `dev-mode-url` settings
+  before navigating to search. You must supply a working backend; this setting
+  does not create one or remove its upstream limits.
+- Source diagnostics record HTTP status, host, and Retry-After without logging
+  request URLs or headers containing credentials. Unrelated third-party requests
+  and late responses from a previous worker attempt cannot trigger cooldowns.
+
+Regression coverage lives in `test/source-access.test.mjs`, the worker and
+cascade tests, and the Electron smoke check's local HTTP 429/403 fixtures.
+These checks do not establish current provider availability or live quotas.
+
 ## Keep trying
 
 Enable **Settings → Downloading → Keep trying** to automatically retry missing

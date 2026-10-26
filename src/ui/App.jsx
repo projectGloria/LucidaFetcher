@@ -6,13 +6,15 @@ import QueueView from './views/QueueView.jsx';
 import SettingsView from './views/SettingsView.jsx';
 import AddView from './views/AddView.jsx';
 import TransportBar from './components/TransportBar.jsx';
+import TitleBar from './components/TitleBar.jsx';
+import SidebarActivity from './components/SidebarActivity.jsx';
 import RenderBoundary from './components/RenderBoundary.jsx';
 import Icon from './components/Icon.jsx';
 
 const NAV = [
-  { id: 'queue', label: 'Downloads', icon: 'download' },
-  { id: 'add', label: 'Add music', icon: 'plus' },
-  { id: 'settings', label: 'Settings', icon: 'settings' },
+  { id: 'queue', label: 'Downloads', icon: 'download', key: '1' },
+  { id: 'add', label: 'Add music', icon: 'plus', key: '2' },
+  { id: 'settings', label: 'Settings', icon: 'settings', key: '3' },
 ];
 
 export default function App() {
@@ -23,11 +25,29 @@ export default function App() {
   const [throttleOff, setThrottleOff] = useState(false);
   const [toasts, setToasts] = useState([]);
 
+  const dismissToast = (id) => setToasts((t) => t.filter((x) => x.id !== id));
   const toast = (text, kind) => {
     const id = Math.random().toString(36).slice(2);
-    setToasts((t) => [...t, { id, text, kind }]);
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 5000);
+    // Capped at three: a bulk action that toasts per item used to stack a
+    // column of notices up the right-hand side and over the content.
+    setToasts((t) => [...t.slice(-2), { id, text, kind }]);
+    // Errors stay up longer - they are the ones that need reading.
+    setTimeout(() => dismissToast(id), kind === 'err' ? 8000 : 4000);
   };
+
+  // Ctrl+1/2/3 switch views, the shortcut every tabbed desktop app has. Only
+  // the setter is captured, and it is stable, so the listener is bound once.
+  useEffect(() => {
+    const onKey = (e) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+      const target = NAV.find((n) => n.key === e.key);
+      if (!target) return;
+      e.preventDefault();
+      setView(target.id);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -82,6 +102,7 @@ export default function App() {
       <TrayBridge />
       <SoundCues />
       <Sidebar view={view} setView={setView} downloadPath={config.downloadPath} />
+      <TitleBar />
       <main className="main">
         <RenderBoundary key={view}>
           {view === 'queue' && (
@@ -103,7 +124,12 @@ export default function App() {
       <TransportBar onToast={toast} />
       <div className="toast-host">
         {toasts.map((t) => (
-          <div key={t.id} className={`toast${t.kind === 'err' ? ' err' : ''}`} role={t.kind === 'err' ? 'alert' : 'status'}>{t.text}</div>
+          <div key={t.id} className={`toast${t.kind === 'err' ? ' err' : ''}`} role={t.kind === 'err' ? 'alert' : 'status'}>
+            <span>{t.text}</span>
+            <button type="button" className="icon-btn" onClick={() => dismissToast(t.id)} aria-label="Dismiss">
+              <Icon name="x" size={13} />
+            </button>
+          </div>
         ))}
       </div>
     </div>
@@ -112,9 +138,12 @@ export default function App() {
 
 function Splash() {
   return (
-    <div className="empty" style={{ height: '100%' }}>
-      <div className="empty-icon"><Icon name="disc" size={24} /></div>
-      <h3>Starting the download engine…</h3>
+    <div className="boot-shell">
+      <TitleBar />
+      <div className="empty">
+        <div className="empty-icon"><Icon name="disc" size={24} /></div>
+        <h3>Starting the download engine…</h3>
+      </div>
     </div>
   );
 }
@@ -128,15 +157,18 @@ function Splash() {
  */
 function BootFailure({ error }) {
   return (
-    <div className="empty" style={{ height: '100%' }}>
-      <div className="empty-icon"><Icon name="alert" size={24} /></div>
-      <h3>The download engine could not start</h3>
-      <p>{String((error && error.message) || error)}</p>
-      <div className="row-actions" style={{ marginTop: 16 }}>
-        <button className="btn btn-primary" onClick={() => window.location.reload()}>Try again</button>
-        {isElectron && (
-          <button className="btn" onClick={() => ipc.invoke('open-log-folder')}>Open the log folder</button>
-        )}
+    <div className="boot-shell">
+      <TitleBar />
+      <div className="empty">
+        <div className="empty-icon"><Icon name="alert" size={24} /></div>
+        <h3>The download engine could not start</h3>
+        <p>{String((error && error.message) || error)}</p>
+        <div className="row-actions" style={{ marginTop: 16 }}>
+          <button className="btn btn-primary" onClick={() => window.location.reload()}>Try again</button>
+          {isElectron && (
+            <button className="btn" onClick={() => ipc.invoke('open-log-folder')}>Open the log folder</button>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -224,6 +256,7 @@ function Sidebar({ view, setView, downloadPath }) {
             className="nav-item"
             aria-current={view === n.id ? 'page' : undefined}
             onClick={() => setView(n.id)}
+            title={`${n.label} (Ctrl+${n.key})`}
           >
             <Icon name={n.icon} size={17} />
             <span>{n.label}</span>
@@ -231,6 +264,10 @@ function Sidebar({ view, setView, downloadPath }) {
           </button>
         ))}
       </nav>
+
+      {/* Live work sits directly under the nav, where the eye already is when
+          switching views - not in the transport bar's one line of text. */}
+      <SidebarActivity onOpen={() => setView('queue')} />
 
       {/* The one place the destination is always visible - "where did it put
           my files" is the most common question a downloader gets asked. */}

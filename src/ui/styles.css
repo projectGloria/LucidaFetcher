@@ -52,7 +52,8 @@
   --fast: 120ms cubic-bezier(.4, 0, .2, 1);
   --med:  200ms cubic-bezier(.4, 0, .2, 1);
 
-  --sidebar-w: 216px;
+  --sidebar-w: 232px;
+  --titlebar-h: 32px;
   --transport-h: 72px;
   --row-h: 48px;
   color-scheme: dark;
@@ -125,23 +126,62 @@ body {
 .app {
   display: grid;
   grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr) var(--transport-h);
+  grid-template-rows: var(--titlebar-h) minmax(0, 1fr) var(--transport-h);
   height: 100%;
   background: var(--bg);
 }
 
+/* --------------------------------------------------------------------------
+   Title strip (the window is frameless - see TitleBar.jsx)
+
+   `-webkit-app-region: drag` hands the area to Windows, which then does move,
+   double-click-to-maximize and Aero Snap itself. Anything clickable inside a
+   drag region must opt out with `no-drag`, or the OS eats the click.
+   -------------------------------------------------------------------------- */
+.titlebar {
+  grid-row: 1; grid-column: 2;
+  display: flex; align-items: stretch;
+  height: var(--titlebar-h);
+  background: var(--bg);
+  -webkit-app-region: drag;
+  user-select: none;
+}
+.titlebar-drag { flex: 1; }
+.caption-buttons { display: flex; -webkit-app-region: no-drag; }
+.caption-btn {
+  display: grid; place-items: center;
+  width: 46px; height: 100%;
+  border: 0; border-radius: 0; background: none;
+  color: var(--text-2); cursor: default;
+  transition: background var(--fast), color var(--fast);
+}
+.caption-btn:hover { background: var(--surface-2); color: var(--text); }
+.caption-btn:active { background: var(--raised); }
+/* The Windows close-button red, so the one destructive caption reads the
+   same as it does in every other window on the desktop. */
+.caption-btn.close:hover { background: #c42b1c; color: #fff; }
+.caption-btn.close:active { background: #b22a1b; color: #fff; }
+
+.boot-shell { display: flex; flex-direction: column; height: 100%; }
+.boot-shell .titlebar { flex: none; }
+.boot-shell .empty { flex: 1; }
+
 .sidebar {
-  grid-row: 1; grid-column: 1;
+  /* Spans the title row too: the sidebar colour runs to the top edge of the
+     window, and the brand doubles as its drag handle. */
+  grid-row: 1 / 3; grid-column: 1;
   display: flex; flex-direction: column; gap: var(--s1);
-  padding: var(--s4) var(--s3);
+  padding: var(--s3);
   background: var(--surface);
   border-right: 1px solid var(--border-soft);
-  min-width: 0;
+  min-width: 0; min-height: 0;
 }
 
 .brand {
   display: flex; align-items: center; gap: 10px;
-  padding: var(--s1) var(--s2) var(--s5);
+  padding: var(--s1) var(--s2) var(--s4);
+  -webkit-app-region: drag;
+  user-select: none;
   font-family: var(--font-display);
   font-weight: 650; font-size: 15px; letter-spacing: -.01em;
 }
@@ -176,7 +216,90 @@ body {
 }
 .nav-item[aria-current="page"] .count { background: var(--accent-soft); color: var(--accent-text); }
 
-.sidebar-foot { margin-top: auto; display: flex; flex-direction: column; gap: var(--s1); }
+.sidebar-foot {
+  margin-top: auto; padding-top: var(--s2);
+  display: flex; flex-direction: column; gap: var(--s1);
+  border-top: 1px solid var(--border-soft);
+}
+
+/* --------------------------------------------------------------------------
+   Sidebar: live activity
+   -------------------------------------------------------------------------- */
+.activity {
+  /* Takes the slack between nav and footer and scrolls inside it, so a long
+     run never pushes the folder link off the bottom of the window. */
+  flex: 0 1 auto; min-height: 0;
+  display: flex; flex-direction: column;
+  margin-top: var(--s4); padding-top: var(--s3);
+  border-top: 1px solid var(--border-soft);
+}
+.activity-head {
+  display: flex; align-items: center; gap: var(--s2);
+  padding: 0 var(--s3) var(--s2);
+  font-size: 11px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--text-3);
+}
+.live-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.activity-count {
+  margin-left: auto; font-variant-numeric: tabular-nums; letter-spacing: 0;
+  color: var(--accent-text);
+}
+.activity-list {
+  margin: 0; padding: 0; list-style: none;
+  min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 1px;
+}
+.activity-row {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; padding: 6px var(--s2);
+  border: 0; border-radius: var(--r2); background: none;
+  color: inherit; font: inherit; text-align: left; cursor: pointer;
+  transition: background var(--fast);
+}
+.activity-row:hover { background: var(--surface-2); }
+.activity-art {
+  position: relative; flex: none;
+  display: grid; place-items: center;
+  width: 30px; height: 30px; margin: 3px; border-radius: var(--r1);
+  background: var(--surface-2); color: var(--text-3);
+}
+.activity-art img { width: 100%; height: 100%; border-radius: inherit; object-fit: cover; display: block; }
+/* A static accent ring while a source is being asked. It used to be a
+   conic-gradient sweeping an animated @property angle behind a mask-composite:
+   none of that is compositor-animatable, so every searching row re-styled,
+   re-painted and re-masked on the main thread at the display's refresh rate
+   (2026-10: the bulk of the app renderer's idle-during-fetch CPU). A ring that
+   does not move costs one paint. */
+.activity-art.spinning::after {
+  content: ''; position: absolute; inset: -3px;
+  border-radius: calc(var(--r1) + 3px);
+  border: 2px solid var(--accent);
+}
+.activity-row.ready .activity-art::after {
+  content: ''; position: absolute; inset: -3px;
+  border-radius: calc(var(--r1) + 3px);
+  border: 2px solid var(--info-soft);
+}
+.activity-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.activity-title { font-size: 12.5px; font-weight: 600; color: var(--text); }
+.activity-sub {
+  display: flex; align-items: center; gap: 5px; min-width: 0;
+  font-size: 11px; color: var(--text-3);
+}
+.activity-row.ready .activity-sub { color: var(--info); }
+.activity-progress { display: flex; align-items: center; gap: var(--s2); height: 15px; }
+.activity-progress .progress { flex: 1; height: 3px; }
+.activity-progress .progress > i { background: var(--info); }
+.activity-pct { flex: none; min-width: 26px; text-align: right; font-size: 10.5px; font-weight: 650; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.activity-more {
+  margin-top: var(--s1); padding: 6px var(--s3);
+  border: 0; border-radius: var(--r2); background: none;
+  color: var(--text-3); font: inherit; font-size: 11.5px; text-align: left; cursor: pointer;
+}
+.activity-more:hover { background: var(--surface-2); color: var(--text-2); }
 .folder-link {
   display: flex; align-items: center; gap: var(--s2);
   width: 100%; padding: var(--s2) var(--s3);
@@ -188,7 +311,7 @@ body {
 .folder-link .truncate { min-width: 0; flex: 1; }
 
 .main {
-  grid-row: 1; grid-column: 2;
+  grid-row: 2; grid-column: 2;
   display: flex; flex-direction: column;
   min-width: 0; min-height: 0;
   background: var(--bg);
@@ -196,7 +319,8 @@ body {
 
 .topbar {
   display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap;
-  min-height: 60px; padding: var(--s3) var(--s5);
+  /* The title strip above already supplies the top breathing room. */
+  min-height: 52px; padding: 2px var(--s5) var(--s3);
   border-bottom: 1px solid var(--border-soft);
 }
 .topbar h1 {
@@ -341,39 +465,33 @@ input[type="range"]:focus-visible { outline: none; }
 .pill.info        { background: var(--info-soft);   color: var(--info); }
 .pill.accent      { background: var(--accent-soft); color: var(--accent-text); }
 .pill.paused-tone { background: var(--paused-soft); color: var(--paused); }
-.pill.live .dot { animation: pulse 1.6s ease-in-out infinite; }
 .pill.slow { background: var(--warn-soft); color: var(--warn); }
-@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
 
 .progress { height: 4px; border-radius: var(--r-pill); background: var(--border); overflow: hidden; }
 .progress > i {
   display: block; height: 100%; border-radius: inherit;
-  background: var(--accent); transition: width var(--med);
+  /* No width transition: progress arrives several times a second, so an
+     eased width meant a layout per frame for as long as anything downloaded. */
+  background: var(--accent);
 }
-.progress.indeterminate > i {
-  width: 35% !important;
-  animation: slide 1.25s cubic-bezier(.65, 0, .35, 1) infinite;
-}
+/* Unknown length: a dimmed full bar rather than a looping slide - same
+   meaning, zero frames. */
+.progress.indeterminate > i { width: 100% !important; opacity: .5; }
 /* A ready transfer is not moving yet: hatched, not sweeping. */
 .progress.waiting {
   background: repeating-linear-gradient(-45deg, var(--border) 0 4px, var(--surface-2) 4px 8px);
 }
-@keyframes slide { from { transform: translateX(-110%); } to { transform: translateX(320%); } }
 
 /* Segmented done/working/missing bar for playlists. */
 .seg-bar {
   display: flex; gap: 1px; height: 4px;
   border-radius: var(--r-pill); overflow: hidden; background: var(--border);
 }
-.seg-bar .seg { height: 100%; transition: width var(--med); }
+.seg-bar .seg { height: 100%; }
 .seg-bar .seg.done    { background: var(--ok); }
 .seg-bar .seg.working { background: var(--accent); }
 .seg-bar .seg.missing { background: var(--warn); }
 
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
-  .progress.indeterminate > i { width: 100% !important; animation: none; opacity: .5; }
-}
 
 .banner {
   display: flex; align-items: center; gap: var(--s2);
@@ -483,6 +601,12 @@ input[type="range"]:focus-visible { outline: none; }
   align-items: center; column-gap: var(--s3);
   min-height: var(--row-h); padding: 0 var(--s3);
   transition: background var(--fast);
+  /* A profile queue is thousands of rows, all in the DOM. This lets Chromium
+     skip style/layout/paint for the ones scrolled out of view; the intrinsic
+     size keeps the scrollbar honest. Nothing in a row draws outside it, so the
+     paint containment this implies clips nothing. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto var(--row-h);
 }
 .row + .row { border-top: 1px solid var(--border-soft); }
 .row:hover { background: var(--surface-2); }
@@ -530,7 +654,6 @@ input[type="range"]:focus-visible { outline: none; }
 }
 .trail .src-icon { display: block; }
 .trail .hop.now { box-shadow: 0 0 0 1px var(--accent); }
-.trail .hop.now .src-icon { animation: pulse 1.6s ease-in-out infinite; }
 .trail .hop.ok { box-shadow: 0 0 0 1px var(--ok); }
 
 .row .state { display: flex; align-items: center; justify-content: flex-start; min-width: 0; }
@@ -565,7 +688,7 @@ input[type="range"]:focus-visible { outline: none; }
    ========================================================================== */
 
 .transport {
-  grid-row: 2; grid-column: 1 / -1;
+  grid-row: 3; grid-column: 1 / -1;
   position: relative; z-index: 50;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
@@ -611,7 +734,6 @@ input[type="range"]:focus-visible { outline: none; }
   position: absolute; right: var(--s4); bottom: calc(100% + var(--s2));
   width: min(440px, calc(100vw - 32px)); max-height: 60vh; overflow-y: auto;
   border-radius: var(--r3); background: var(--raised); box-shadow: var(--shadow-pop);
-  animation: rise var(--med);
 }
 .transfers-panel header {
   position: sticky; top: 0; z-index: 1;
@@ -645,12 +767,13 @@ input[type="range"]:focus-visible { outline: none; }
   display: flex; flex-direction: column; gap: var(--s2); z-index: 500;
 }
 .toast {
-  max-width: 380px; padding: 10px var(--s4);
+  display: flex; align-items: flex-start; gap: var(--s2);
+  max-width: 400px; padding: 10px 8px 10px var(--s4);
   border-radius: var(--r2); background: var(--raised); box-shadow: var(--shadow-pop);
-  animation: rise var(--med);
 }
+.toast > span { flex: 1; min-width: 0; padding-top: 1px; }
+.toast .icon-btn { width: 22px; height: 22px; margin-top: -1px; }
 .toast.err { box-shadow: var(--shadow-pop), inset 3px 0 0 var(--danger); }
-@keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
 /* ==========================================================================
    Add music
@@ -810,7 +933,7 @@ input[type="range"]:focus-visible { outline: none; }
   position: absolute; z-index: 2;
   padding: 2px 7px; border-radius: 5px;
   font-size: 10.5px; font-weight: 650;
-  background: rgba(0, 0, 0, .72); color: #fff; backdrop-filter: blur(6px);
+  background: rgba(0, 0, 0, .72); color: #fff;
 }
 .set-badge { left: 8px; top: 8px; }
 .duration { right: 8px; top: 8px; font-variant-numeric: tabular-nums; }
@@ -831,7 +954,7 @@ input[type="range"]:focus-visible { outline: none; }
   width: 38px; height: 38px; padding: 0;
   border: 0; border-radius: 50%;
   background: rgba(20, 20, 24, .88); color: #fff; cursor: pointer;
-  box-shadow: var(--shadow-2); backdrop-filter: blur(6px);
+  box-shadow: var(--shadow-2);
   transition: transform var(--fast), background var(--fast);
 }
 .hover-btn:hover:not(:disabled) { transform: scale(1.06); }
@@ -893,10 +1016,8 @@ input[type="range"]:focus-visible { outline: none; }
 
 .skeleton {
   aspect-ratio: .82; border-radius: var(--r3);
-  background: linear-gradient(100deg, var(--surface) 20%, var(--surface-2) 40%, var(--surface) 55%);
-  background-size: 300% 100%; animation: skeleton-shift 1.5s ease infinite;
+  background: var(--surface-2);
 }
-@keyframes skeleton-shift { from { background-position: 100% 0; } to { background-position: 0 0; } }
 
 /* Profiles */
 .profile-identity { display: flex; align-items: center; gap: var(--s4); flex: 1; min-width: 0; }
@@ -942,13 +1063,12 @@ input[type="range"]:focus-visible { outline: none; }
 .modal-backdrop {
   position: fixed; inset: 0; z-index: 60;
   display: flex; align-items: center; justify-content: center;
-  padding: var(--s6); background: rgba(0, 0, 0, .66); backdrop-filter: blur(4px);
+  padding: var(--s6); background: rgba(0, 0, 0, .66);
 }
 .modal {
   display: flex; flex-direction: column;
   width: min(760px, 100%); max-height: 84vh; overflow: hidden;
   border-radius: var(--r4); background: var(--surface); box-shadow: var(--shadow-pop);
-  animation: rise var(--med);
 }
 .modal-head {
   display: flex; align-items: center; gap: var(--s4);
