@@ -9,7 +9,7 @@ export const SOURCE_DIRECT = 'direct';
 
 export const DEFAULT_MAX_VARIANTS = 2;
 
-export const DOWNLOAD_SERVICES = ['qobuz', 'tidal', 'deezer', 'amazon', 'yandex', 'monochrome'];
+export const DOWNLOAD_SERVICES = ['qobuz', 'tidal', 'deezer', 'amazon', 'yandex', 'monochrome', 'hifi-tidal', 'squid-qobuz'];
 
 export function buildPlan(spec = {}) {
   const used = (spec.variants || []).filter(Boolean)
@@ -19,7 +19,7 @@ export function buildPlan(spec = {}) {
   for (const service of new Set(spec.services || [])) {
     if (!DOWNLOAD_SERVICES.includes(service)) continue;
     used.forEach((query, variantIndex) => plan.push({
-      source: service === SOURCE_MONOCHROME ? SOURCE_MONOCHROME : SOURCE_LUCIDA,
+      source: ['hifi-tidal', 'squid-qobuz'].includes(service) ? service : service === SOURCE_MONOCHROME ? SOURCE_MONOCHROME : SOURCE_LUCIDA,
       service, query, variantIndex,
     }));
   }

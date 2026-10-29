@@ -134,6 +134,7 @@ export class Controller {
       concurrency: opts.concurrency || 3,
       run: (item, slot, signal) => this._runChain(item, slot, signal),
       onEvent: (name, payload) => {
+        if (name === 'slot-idle') opts.onSlotIdle?.(payload.slot);
         if (name === 'idle') this._emit();
         if (name === 'error') {
           // A chain should never throw; if one does, the track must still reach
@@ -151,6 +152,20 @@ export class Controller {
 
   subscribe(fn) { this._listeners.add(fn); return () => this._listeners.delete(fn); }
   getSnapshot() { return this._version; }
+
+  getItemSnapshot(id) {
+    const rec = this._getRecord(id);
+    return rec ? JSON.stringify([rec.status, rec.statusText, rec.priority, rec.attemptStartedAt,
+      rec.transferService, rec.step, rec.result, rec.item.image]) : '';
+  }
+
+  subscribeItem(id, fn) {
+    let previous = this.getItemSnapshot(id);
+    return this.subscribe(() => {
+      const next = this.getItemSnapshot(id);
+      if (next !== previous) { previous = next; fn(); }
+    });
+  }
 
   _getRecord(id) {
     if (this.items.has(id)) return this.items.get(id);

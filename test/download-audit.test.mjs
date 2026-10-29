@@ -219,14 +219,16 @@ test('downloads-check scans all subfolders recursively and addProfile/checkExist
     fs.mkdirSync(subA, { recursive: true });
     fs.mkdirSync(subB, { recursive: true });
     // Build a valid FLAC with STREAMINFO (0), PICTURE (6, last), and an audio frame (0xff 0xf8)
-    const flac = Buffer.alloc(60);
+    const flac = Buffer.alloc(160);
     flac.write('fLaC', 0, 'ascii');
     flac[4] = 0x00; flac.writeUIntBE(34, 5, 3); flac.writeUInt16BE(4096, 8);
     // 44100 Hz, 2 channels, 16 bps, 441000 samples (10s)
     const packed = (44100n << 44n) | (1n << 41n) | (15n << 36n) | 441000n;
     flac.writeBigUInt64BE(packed, 18);
-    flac[42] = 0x86; flac.writeUIntBE(4, 43, 3); // PICTURE block (last=1, type=6, len=4)
-    flac[50] = 0xff; flac[51] = 0xf8;
+    flac[42] = 0x86; flac.writeUIntBE(42, 43, 3);
+    flac.writeUInt32BE(9, 50); flac.write('image/png', 54);
+    flac.writeUInt32BE(1, 83); flac[87] = 137; // decoder fixture byte
+    flac[88] = 0xff; flac[89] = 0xf8;
 
     const prodigyClean = path.join(subA, 'The Prodigy - Smack My Bitch Up.flac');
     const prodigyDup = path.join(subA, 'The Prodigy - Smack My Bitch Up (1).flac');
@@ -239,7 +241,7 @@ test('downloads-check scans all subfolders recursively and addProfile/checkExist
     const matchingMod = await import('../src/engine/matching.mjs');
     let checkHandler;
     const sandbox = {
-      fs, Buffer, path,
+      fs, Buffer, path, nativeImage: { createFromBuffer: bytes => ({ isEmpty: () => bytes[0] !== 137 }) },
       downloadPath: temp,
       config: { scanFolderForExisting: true },
       transfers: {},

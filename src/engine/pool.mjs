@@ -184,6 +184,7 @@ export class Pool {
       )
       .finally(() => {
         this.active.delete(item.id);
+        this.onEvent('slot-idle', { slot });
         if (slot < this._concurrency) this._freeSlots.push(slot);
         this._pump();
       });

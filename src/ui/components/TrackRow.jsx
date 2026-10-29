@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore } from 'react';
+import { memo, useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import { getController, isElectron, ipc } from '../engine.js';
 import { serviceLabel } from '../../engine/status.mjs';
 import { displayedService } from '../../engine/source-display.mjs';
@@ -33,7 +33,20 @@ const TONE = {
   cancelled:   { pill: '',            label: 'Cancelled' },
 };
 
-export default function TrackRow({
+// Records are mutable, so memoizing only their object identity freezes status.
+// Capture the small visible-row snapshot before passing it through memo.
+export default function TrackRow(props) {
+  const rec = props.rec;
+  const rowState = JSON.stringify([rec.status, rec.statusText, rec.priority, rec.attemptStartedAt,
+    rec.transferService, rec.step, rec.result, rec.item, rec.reused]);
+  return <MemoRow {...props} rowState={rowState} />;
+}
+const MemoRow = memo(TrackRowContent, (before, after) => before.rowState === after.rowState
+  && before.queueIndex === after.queueIndex && before.draggableQueue === after.draggableQueue
+  && before.isDragTarget === after.isDragTarget && before.onToast === after.onToast
+  && before.onDragStart === after.onDragStart && before.onDragOver === after.onDragOver && before.onDrop === after.onDrop);
+
+function TrackRowContent({
   rec,
   queueIndex = null,
   draggableQueue = false,
@@ -43,6 +56,12 @@ export default function TrackRow({
   isDragTarget = false,
   onToast,
 }) {
+  const store = getController();
+  const recordId = rec.trackKey || rec.item.id;
+  useSyncExternalStore(
+    useCallback(fn => store?.subscribeItem ? store.subscribeItem(recordId, fn) : () => {}, [store, recordId]),
+    useCallback(() => store?.getItemSnapshot?.(recordId) || '', [store, recordId])
+  );
   const { item, status, statusText } = rec;
   const id = rec.id || item.id;
   const tone = TONE[status] || TONE.queued;

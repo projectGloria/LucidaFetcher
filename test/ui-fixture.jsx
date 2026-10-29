@@ -4,6 +4,7 @@ import { flushSync } from 'react-dom';
 import RenderBoundary from '../src/ui/components/RenderBoundary.jsx';
 import TransportBar from '../src/ui/components/TransportBar.jsx';
 import { initEngine } from '../src/ui/engine.js';
+import { parseCatalogHtml } from '../src/engine/public-catalog.mjs';
 
 const c = await initEngine({ config: {}, log() {} });
 c.pause();
@@ -45,4 +46,18 @@ window.runUIRegression = () => {
   check(!document.querySelector('[role="alert"]') && document.body.textContent.includes('Interface restored'), 'Interface recovery failed');
   check(c.getItems()[0] === rec, 'Recovery replaced the download queue');
   return { rows: records.length, progressTicks: 80, extraExpansions: 0, recovered: true };
+};
+
+window.runCatalogRegression = async () => {
+  const check = (condition, message) => { if (!condition) throw new Error(message); };
+  const track = await parseCatalogHtml('<script>window.catalogCodeRan = true;</script><script type="application/ld+json">' + JSON.stringify({
+    '@type': 'MusicRecording', name: 'Song (Remix)', byArtist: [{ name: 'Artist' }], duration: 'PT3M1S', isrcCode: 'ABC123', image: 'https://art.example/cover.png',
+  }) + '</script>', { service: 'tidal', type: 'track', id: '1' });
+  check(track.complete && track.tracks[0].isrc === 'ABC123' && track.tracks[0].durationSec === 181, 'Track metadata was lost');
+  check(track.tracks[0].title === 'Song (Remix)' && !window.catalogCodeRan, 'Static catalog parsing changed recording or ran page code');
+  const album = await parseCatalogHtml('<script>window.tidalMediaSessionMetadata={"1":{"title":"Song","artist":"Artist","album":"Album","artwork":[{"src":"https://art.example/a.png"}]}};</script>'
+    + '<list-item product-type="track" product-id="1"><span slot="title">Song (Live)</span><time slot="duration">4:12</time></list-item>',
+  { service: 'tidal', type: 'album', id: 'a' });
+  check(album.tracks[0].title === 'Song (Live)' && album.tracks[0].durationSec === 252 && !album.complete, 'Embed truncation or version was lost');
+  return true;
 };

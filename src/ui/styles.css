@@ -609,6 +609,8 @@ input[type="range"]:focus-visible { outline: none; }
   contain-intrinsic-size: auto var(--row-h);
 }
 .row + .row { border-top: 1px solid var(--border-soft); }
+.virtual-rows { flex-shrink: 0; }
+.virtual-rows > div > .row { height: var(--row-h); border-top: 1px solid var(--border-soft); content-visibility: visible; }
 .row:hover { background: var(--surface-2); }
 .row[draggable="true"] { cursor: grab; }
 .row.drag-over { box-shadow: inset 0 2px 0 var(--accent); background: var(--accent-soft); }

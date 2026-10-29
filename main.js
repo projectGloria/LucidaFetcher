@@ -534,6 +534,8 @@ function rememberTransfer(item, ctx, savePath) {
         service: ctx.service || null, attemptService: ctx.attemptService || null,
         originalService: ctx.originalService || null, sourceUrl: ctx.sourceUrl || null,
         artworkUrl: ctx.artworkUrl || null,
+        trackArtworkUrl: ctx.trackArtworkUrl || null, finalPath: ctx.finalPath || null,
+        directApi: !!ctx.directApi,
       },
       at: Date.now(),
     };
@@ -665,7 +667,8 @@ async function cleanLeftoverPartFiles(dir) {
       if (quitting) return;
       const full = path.join(folder, ent.name);
       if (ent.isDirectory()) { folders.push(full); continue; }
-      if (!ent.isFile() || !/\.(part|crdownload)$/i.test(ent.name)) continue;
+      if (!ent.isFile() || (!/\.(part|crdownload)$/i.test(ent.name)
+        && !/^\.lucida-[a-f0-9-]+\.flac(?:\.[a-f0-9-]+\.metadata)?$/i.test(ent.name))) continue;
       const key = savePathKey(full);
       if (protectedPaths.has(key) || liveSavePaths.has(key)) continue;
       try {
@@ -910,10 +913,32 @@ ipcMain.handle('http-json', async (event, url) => {
 });
 
 const MEDIA_HOSTS = /(^|\.)(soundcloud\.com|snd\.sc|youtube\.com|youtu\.be|music\.youtube\.com)$/i;
+let catalogTransport;
+ipcMain.handle('catalog-read', async (_event, { url, cursor }) => {
+  if (!catalogTransport) catalogTransport = import('./src/engine/catalog-http.mjs').then(({ createCatalogTransport }) =>
+    createCatalogTransport({ fetch: globalThis.fetch, readText: boundedText }));
+  return (await catalogTransport)(url, cursor);
+});
+
+const providerRequests = new Map();
+ipcMain.on('provider-request-cancel', (_event, id) => providerRequests.get(id)?.abort());
+ipcMain.handle('provider-request', async (_event, { id, operation, args, requestId }) => {
+  const controller = new AbortController();
+  providerRequests.set(requestId, controller);
+  try {
+    const { API_PROVIDERS, providerRequestUrl } = await import('./src/engine/providers.mjs');
+    if (!API_PROVIDERS[id]?.qualified) throw new Error('Provider has not passed qualification');
+    const response = await net.fetch(providerRequestUrl(id, operation, args), {
+      redirect: 'error', signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15000)]),
+    });
+    const text = await boundedText(response, id);
+    return { status: response.status, retryAfter: response.headers.get('retry-after'), data: response.ok ? JSON.parse(text) : null };
+  } finally { providerRequests.delete(requestId); }
+});
 
 // Enforce the same source policy at the process boundary, including old queues.
 function downloadSourceEnabled(service) {
-  return ['qobuz', 'tidal', 'amazon', 'deezer', 'yandex', 'monochrome'].includes(service)
+  return ['qobuz', 'tidal', 'amazon', 'deezer', 'yandex', 'monochrome', 'hifi-tidal', 'squid-qobuz'].includes(service)
     && (config.fallbackServices || ['amazon']).includes(service);
 }
 
@@ -962,8 +987,8 @@ function isCompleteFlacFile(file, expectedBytes = 0) {
 
 // A FLAC with no embedded PICTURE metadata block is rejected: artwork is part of
 // what makes a download worth keeping, and a file without it is incomplete.
-// Walks the same header chain as stripOversizedArtwork but synchronously and
-// without reading block bodies - only the 4-byte headers are touched.
+// Decoding is bounded and cached by validateFlacCached. A PICTURE header alone
+// is not evidence of usable artwork (truncated/empty blocks occur in practice).
 function hasEmbeddedArtwork(file) {
   if (!/\.flac$/i.test(file || '')) return false;
   let fd;
@@ -972,13 +997,27 @@ function hasEmbeddedArtwork(file) {
     const magic = Buffer.alloc(4);
     if (fs.readSync(fd, magic, 0, 4, 0) !== 4 || magic.toString('ascii') !== 'fLaC') return false;
     const head = Buffer.alloc(4);
-    let off = 4, last = false;
+    let off = 4, last = false, count = 0;
     while (!last) {
+      if (++count > 10000) return false;
       if (fs.readSync(fd, head, 0, 4, off) !== 4) return false;
       last = !!(head[0] & 0x80);
       const type = head[0] & 0x7f;
-      if (type === 6) return true;   // PICTURE block found
       const len = (head[1] << 16) | (head[2] << 8) | head[3];
+      if (type === 6 && len >= 32 && len <= 16 * 1024 * 1024) {
+        const body = Buffer.alloc(len);
+        if (fs.readSync(fd, body, 0, len, off + 4) !== len) return false;
+        let at = 4;
+        for (let field = 0; field < 2; field++) {
+          if (at + 4 > len) return false;
+          at += 4 + body.readUInt32BE(at);
+        }
+        at += 16;
+        if (at + 4 > len) return false;
+        const imageLength = body.readUInt32BE(at); at += 4;
+        if (imageLength > 0 && at + imageLength === len
+            && !nativeImage.createFromBuffer(body.subarray(at)).isEmpty()) return true;
+      }
       off += 4 + len;
     }
     return false;
@@ -1009,6 +1048,8 @@ async function validateFlacCached(file, bytes = 0) {
 
 const mediaTransfers = new Map();
 ipcMain.on('download-cancel-item', (event, itemId) => {
+  const finalizing = finalizingItems.get(itemId);
+  if (finalizing) finalizing.cancelled = true;
   for (const [id, ctx] of pendingContexts) if (ctx.itemId === itemId) pendingContexts.delete(id);
   mediaTransfers.get(itemId)?.abort();
   for (const rec of liveItems) {
@@ -1155,7 +1196,7 @@ function scanDownloadFolders(extraDirs = []) {
         const full = path.join(dir, ent.name);
         if (ent.isDirectory()) {
           queue.push(full);
-        } else if (ent.isFile() && AUDIO_EXT.test(ent.name)) {
+        } else if (ent.isFile() && AUDIO_EXT.test(ent.name) && !ent.name.startsWith('.lucida-')) {
           const fKey = savePathKey(full);
           if (!protectedPaths.has(fKey) && !liveSavePaths.has(fKey)) {
             entries.push({ file: ent.name, dir, dirKey: dKey, savePath: full, key: fKey });
@@ -1736,6 +1777,36 @@ ipcMain.handle('select-directory', async () => {
 // wrong folder and recorded against the wrong track in the wrong report. That
 // is silent corruption, not a visible failure, so the key is the worker.
 const pendingContexts = new Map(); // webContents id -> context
+const providerDownloads = new Map(); // short-lived signed URL -> owned context
+const pendingProviderStarts = new Map();
+ipcMain.handle('provider-download', async (_event, payload) => {
+  if (!payload.itemId || pendingProviderStarts.has(payload.itemId)) throw new Error('Transfer is already starting');
+  const starting = { cancelled: false };
+  pendingProviderStarts.set(payload.itemId, starting);
+  try {
+    const { API_PROVIDERS } = await import('./src/engine/providers.mjs');
+    if (starting.cancelled) throw new Error('Transfer cancelled');
+    if (!API_PROVIDERS[payload.service]?.qualified || !downloadSourceEnabled(payload.service)) throw new Error('Provider is disabled');
+    const url = new URL(payload.url);
+    const host = payload.service === 'hifi-tidal' ? /(^|\.)tidal\.com$/ : /(^|\.)(qobuz\.com|akamaized\.net)$/;
+    if (url.protocol !== 'https:' || url.username || url.password || !host.test(url.hostname)) throw new Error('Invalid provider media host');
+    if (providerDownloads.has(url.href)) throw new Error('This media transfer is already starting');
+    const context = { ...payload, attemptService: payload.service, directApi: true, sourceUrl: null };
+    delete context.url;
+    const timer = setTimeout(() => providerDownloads.delete(url.href), 15000);
+    providerDownloads.set(url.href, { context, timer });
+    try { session.defaultSession.downloadURL(url.href); }
+    catch (error) { clearTimeout(timer); providerDownloads.delete(url.href); throw error; }
+  } finally { pendingProviderStarts.delete(payload.itemId); }
+});
+
+ipcMain.on('download-cancel-item', (_event, itemId) => {
+  const starting = pendingProviderStarts.get(itemId);
+  if (starting) starting.cancelled = true;
+  for (const [url, entry] of providerDownloads) if (entry.context.itemId === itemId) {
+    clearTimeout(entry.timer); providerDownloads.delete(url);
+  }
+});
 
 // Downloads that do not originate in a worker webview (a direct link opened in
 // the main window) still need somewhere to look.
@@ -1873,6 +1944,7 @@ ipcMain.handle('open-path', async (event, targetPath) => {
 const THROTTLE_TICK_MS = 500;
 const liveItems = new Set();
 const finalizingDownloads = new Set();
+const finalizingItems = new Map();
 const DOWNLOAD_STALL_MS = 120000;
 let throttleTimer = null;
 let throttleSupported = true;
@@ -2108,6 +2180,22 @@ async function checkDownloadIdentity(file, context) {
 // file. Keyed by path, valued by the live record that owns it.
 const liveSavePaths = new Map();
 
+let trackArtworkLoader;
+async function ensureDownloadArtwork(file, context) {
+  const { hasValidArtwork, embedArtwork } = await import('./src/engine/flac-artwork.mjs');
+  const decode = bytes => !nativeImage.createFromBuffer(bytes).isEmpty();
+  if (!await hasValidArtwork(file, decode) && context?.trackArtworkUrl) {
+    if (!trackArtworkLoader) trackArtworkLoader = import('./src/engine/resource-cache.mjs').then(({ resourceCache }) =>
+      resourceCache(safeFetchImage, { maxEntries: 32, ttl: 300000, sizeOf: value => value.buf.length }));
+    const { buf } = await (await trackArtworkLoader)(context.trackArtworkUrl);
+    const image = nativeImage.createFromBuffer(buf);
+    if (image.isEmpty()) return false;
+    const resized = image.resize({ width: Math.min(1000, image.getSize().width) });
+    await embedArtwork(file, { bytes: resized.toPNG(), ...resized.getSize() });
+  }
+  return hasValidArtwork(file, decode);
+}
+
 function savePathKey(file) {
   const resolved = path.resolve(file);
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
@@ -2140,7 +2228,9 @@ function freeSavePath(wanted, rec) {
 function handleWillDownload(event, item, webContents) {
   // Claim this worker's context. Taking it by webContents rather than from a
   // shared slot is what lets several downloads be in flight at once.
-  const ctx = takeDownloadContext(webContents) || takeResumeContext(item);
+  const direct = providerDownloads.get(item.getURLChain?.()[0] || item.getURL());
+  if (direct) { clearTimeout(direct.timer); providerDownloads.delete(item.getURLChain?.()[0] || item.getURL()); }
+  const ctx = direct?.context || takeDownloadContext(webContents) || takeResumeContext(item);
   let rec = null;
   try {
 
@@ -2149,7 +2239,7 @@ function handleWillDownload(event, item, webContents) {
     // for containment and this path did not - so it is checked the same way here
     // rather than left as the one place that trusts it.
     const rawName = safeBaseName(item.getFilename());
-    const fileName = (ctx?.artist && ctx?.title && /\.flac$/i.test(rawName))
+    const fileName = (ctx?.artist && ctx?.title && (ctx.directApi || /\.flac$/i.test(rawName)))
       ? safeBaseName(`${ctx.artist} - ${ctx.title}.flac`)
       : rawName;
     const service = ctx && (ctx.attemptService || ctx.service);
@@ -2210,6 +2300,16 @@ function handleWillDownload(event, item, webContents) {
     rec = { item, itemId: ctx?.itemId, allowed: initialReceived, last: Date.now(), throttled: false, mark: initialReceived,
       lastReceived: initialReceived, lastByteAt: Date.now(), resumeAttempts: 0, interrupted: false };
     if (!resumedPath) savePath = freeSavePath(savePath, rec);
+    const finalPath = ctx?.finalPath || savePath;
+    if (!resumedPath) {
+      liveSavePaths.set(savePathKey(finalPath), rec);
+      savePath = path.join(path.dirname(finalPath), `.lucida-${crypto.randomUUID()}.flac`);
+      if (ctx) ctx.finalPath = finalPath;
+    } else if (finalPath !== savePath) {
+      if (liveSavePaths.has(savePathKey(finalPath))) throw new Error('Final path already reserved');
+      liveSavePaths.set(savePathKey(finalPath), rec);
+    }
+    rec.finalPath = finalPath;
     rec.savePath = savePath;
     if (resumedPath && liveSavePaths.has(savePathKey(savePath))) throw new Error('Transfer already owns this resume path');
 
@@ -2238,7 +2338,7 @@ function handleWillDownload(event, item, webContents) {
       itemId: ctx && ctx.itemId || null,
       originalService: ctx && ctx.originalService || null,
       attemptedService: ctx && ctx.attemptService || null,
-      url: item.getURL(),
+      url: ctx?.directApi ? null : item.getURL(),
       mime: item.getMimeType()
     });
 
@@ -2294,6 +2394,7 @@ function handleWillDownload(event, item, webContents) {
       const finishing = (async () => {
         let state = downloadState;
         liveItems.delete(rec);
+        finalizingItems.set(ctx?.itemId, rec);
         if (state !== 'completed' && rec.failureReason) state = rec.failureReason;
         // Keep ownership through validation and asynchronous metadata repair.
         const ownsPath = liveSavePaths.get(savePathKey(savePath)) === rec;
@@ -2302,7 +2403,12 @@ function handleWillDownload(event, item, webContents) {
             state = 'rejected-format';
             if (ownsPath) { try { fs.unlinkSync(savePath); } catch {} }
           }
-          if (state === 'completed' && !hasEmbeddedArtwork(savePath)) {
+          if (state === 'completed') {
+            try {
+              if (!await ensureDownloadArtwork(savePath, ctx)) state = 'rejected-no-artwork';
+            } catch { state = 'rejected-no-artwork'; }
+          }
+          if (state === 'rejected-no-artwork') {
             state = 'rejected-no-artwork';
             if (ownsPath) { try { fs.unlinkSync(savePath); } catch {} }
           }
@@ -2352,6 +2458,17 @@ function handleWillDownload(event, item, webContents) {
             // remain responsive while the repair is in progress.
             const art = await stripOversizedArtwork(savePath);
             if (art) logEvent('artwork.resized', Object.assign({ file: fileName }, art));
+            if (!isCompleteFlacFile(savePath) || !hasEmbeddedArtwork(savePath)) throw new Error('Invalid finalized FLAC');
+            if (rec.cancelled) throw new Error('Cancelled during finalization');
+            if (savePath !== finalPath) {
+              // link is exclusive: an unrelated file created during the transfer
+              // must never be overwritten by promotion of our temporary file.
+              await fs.promises.link(savePath, finalPath);
+              await fs.promises.unlink(savePath);
+              liveSavePaths.delete(savePathKey(savePath));
+              savePath = finalPath;
+              Object.assign(rec, { savePath });
+            }
             // What is actually on disk: stripOversizedArtwork may have just rebuilt
             // the file smaller than the bytes that came down the wire. The manifest
             // used to record the wire count while the folder report re-stated the
@@ -2374,7 +2491,7 @@ function handleWillDownload(event, item, webContents) {
                 title: ctx.title,
                 artist: ctx.artist || '',
                 service: ctx.attemptService || ctx.service || null,
-                sourceUrl: ctx.sourceUrl || item.getURL(),
+                sourceUrl: ctx.directApi ? null : ctx.sourceUrl || item.getURL(),
                 file: path.basename(savePath),
                 bytes: onDisk,
                 via: 'download',
@@ -2391,11 +2508,14 @@ function handleWillDownload(event, item, webContents) {
             service: ctx && ctx.attemptService || null, itemId: ctx && ctx.itemId || null, savePath, bytes: completedBytes ?? bytes });
         } finally {
           // Metadata repair awaits disk I/O; keep the path reserved until it ends.
+          if (savePath !== finalPath && ownsPath && !quitting) await fs.promises.unlink(savePath).catch(() => {});
+          if (finalizingItems.get(ctx?.itemId) === rec) finalizingItems.delete(ctx?.itemId);
           if (liveSavePaths.get(savePathKey(savePath)) === rec) liveSavePaths.delete(savePathKey(savePath));
+          if (liveSavePaths.get(savePathKey(finalPath)) === rec) liveSavePaths.delete(savePathKey(finalPath));
         }
       })().catch(err => {
         logEvent('download.finalize.failed', { itemId: ctx?.itemId, message: err.message });
-        toUI('download-status', { itemId: ctx?.itemId, file: fileName, status: 'finalize-failed', savePath });
+        toUI('download-status', { itemId: ctx?.itemId, file: fileName, status: rec.cancelled ? 'cancelled' : 'finalize-failed', savePath });
       }).finally(() => finalizingDownloads.delete(finishing));
       finalizingDownloads.add(finishing);
     });
@@ -2406,6 +2526,7 @@ function handleWillDownload(event, item, webContents) {
       if (rec.savePath && liveSavePaths.get(savePathKey(rec.savePath)) === rec) {
         liveSavePaths.delete(savePathKey(rec.savePath));
       }
+      if (rec.finalPath && liveSavePaths.get(savePathKey(rec.finalPath)) === rec) liveSavePaths.delete(savePathKey(rec.finalPath));
     }
     forgetTransfer(ctx?.itemId);
     logEvent('download.setup.failed', { itemId: ctx?.itemId, message: err.message });

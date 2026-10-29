@@ -384,17 +384,18 @@ function downloadHarness({ repair = async () => null, valid = true, artwork = tr
   const files = new Set();
   const context = { itemId: 'a', key: 'key-a', title: 'Song', attemptService: 'qobuz' };
   const sandbox = {
-    path, Date, process, MEDIA_HOSTS: /soundcloud|youtube/,
+    path, Date, process, crypto: { randomUUID: () => String(Math.random()) }, providerDownloads: new Map(), MEDIA_HOSTS: /soundcloud|youtube/,
     WINDOWS_RESERVED: /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i,
     downloadPath: path.resolve('downloads'),
-    pendingContexts: new Map(), liveSavePaths: new Map(), liveItems: new Set(), finalizingDownloads: new Set(),
+    pendingContexts: new Map(), liveSavePaths: new Map(), liveItems: new Set(), finalizingDownloads: new Set(), finalizingItems: new Map(),
     manifest: {}, quitting: false, URL,
-    fs: { existsSync: file => files.has(file), mkdirSync() {}, unlinkSync: file => files.delete(file), statSync: () => ({ size: 42 }), promises: { unlink: async file => files.delete(file) } },
+    fs: { existsSync: file => files.has(file), mkdirSync() {}, unlinkSync: file => files.delete(file), statSync: () => ({ size: 42 }), promises: { unlink: async file => files.delete(file), link: async (_from, to) => { if (files.has(to)) throw new Error('Destination exists'); files.add(to); } } },
     takeDownloadContext: () => ({ ...context }), takeResumeContext: () => null,
     downloadSourceEnabled: () => true, forgetTransfer() {}, rememberTransfer() {}, startThrottleTimer() {},
     userPaused: false, logEvent() {}, toUI: (...args) => messages.push(args),
     isFlacFile: () => valid, isCompleteFlacFile: () => valid, hasEmbeddedArtwork: () => artwork,
     checkDownloadIdentity: identity,
+    ensureDownloadArtwork: async () => artwork,
     partialSize: file => files.has(file) ? 42 : 0,
     stripOversizedArtwork: repair, saveManifest() {}, writeReport() {},
   };
@@ -420,7 +421,7 @@ test('download finalization holds its save path through asynchronous metadata re
   h.sandbox.handleWillDownload(h.event, a, {});
   a.emit('done', null, 'completed');
   assert.equal(h.sandbox.finalizingDownloads.size, 1);
-  assert.equal(h.sandbox.liveSavePaths.size, 1);
+  assert.equal(h.sandbox.liveSavePaths.size, 2); // temporary bytes and final destination
   const b = h.item();
   h.context.itemId = 'b'; h.context.key = 'key-b';
   h.sandbox.handleWillDownload(h.event, b, {});
@@ -442,6 +443,20 @@ test('a finalization error settles the renderer and releases the path rather tha
   assert.equal(h.sandbox.liveSavePaths.size, 0);
   assert.equal(h.sandbox.finalizingDownloads.size, 0);
   assert.equal(h.messages.at(-1)[1].status, 'finalize-failed');
+  assert.equal(h.files.size, 0);
+});
+
+test('cancelling during metadata finalization never publishes the temporary FLAC', async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const h = downloadHarness({ repair: () => gate });
+  const item = h.item(); h.sandbox.handleWillDownload(h.event, item, {});
+  item.emit('done', null, 'completed');
+  h.sandbox.finalizingItems.get('a').cancelled = true;
+  release(); await Promise.all([...h.sandbox.finalizingDownloads]);
+  assert.equal(h.files.size, 0); assert.equal(h.sandbox.liveSavePaths.size, 0);
+  assert.equal(h.messages.at(-1)[1].status, 'cancelled');
+  assert.deepEqual(Object.keys(h.sandbox.manifest), []);
 });
 
 test('a download that cannot open its destination reports failure before claiming resources', () => {

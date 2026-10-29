@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useProfileTree, useStats, useQueueOrder, getController } from '../engine.js';
 import TrackRow from '../components/TrackRow.jsx';
+import VirtualRows from '../components/VirtualRows.jsx';
 import Icon from '../components/Icon.jsx';
 
 const FILTERS = [
@@ -52,16 +53,17 @@ export default function QueueView({ onToast, preferences = {}, onPreferencesChan
     save({ collapsed: [...next] });
   };
 
-  const shape = (g) => ({ ...g, allRecords: g.records, totalRecords: g.records.length, records: g.records.filter((r) => matches(r, filter)) });
   // A profile survives the filter if any of its playlists does, so "Missing"
   // shows the profile with only the playlists that are missing something -
   // which is the list the user opened that filter to get.
-  const visible = tree
-    .map((node) => (node.kind === 'profile'
-      ? { ...node, totalGroups: node.groups.length, groups: node.groups.map(shape).filter((g) => g.records.length) }
-      : { ...node, group: shape(node.group) }))
-    .filter((node) => (node.kind === 'profile' ? node.groups.length : node.group.records.length));
-  const visibleGroups = visible.flatMap((node) => (node.kind === 'profile' ? node.groups : [node.group]));
+  const visible = useMemo(() => {
+    const shape = g => ({ ...g, allRecords: g.records, totalRecords: g.records.length, records: g.records.filter(r => matches(r, filter)) });
+    return tree.map(node => node.kind === 'profile'
+      ? { ...node, totalGroups: node.groups.length, groups: node.groups.map(shape).filter(g => g.records.length) }
+      : { ...node, group: shape(node.group) })
+      .filter(node => node.kind === 'profile' ? node.groups.length : node.group.records.length);
+  }, [tree, filter]);
+  const visibleGroups = useMemo(() => visible.flatMap(node => node.kind === 'profile' ? node.groups : [node.group]), [visible]);
 
   // Remove the whole playlist even when a status filter hides some tracks.
   const removeGroup = (group) => {
@@ -248,11 +250,11 @@ function CustomQueuePanel({ orderData, filter, onToast }) {
             <span className="pill accent live"><span className="dot" />Now</span>
             <h2>Working <span className="count">{activeList.length}</span></h2>
           </div>
-          <div className="rows">
-            {activeList.map((rec, idx) => (
+          <VirtualRows records={activeList}>
+            {(rec, idx) => (
               <TrackRow key={rec.id || rec.item.id} rec={rec} queueIndex={idx + 1} onToast={onToast} />
-            ))}
-          </div>
+            )}
+          </VirtualRows>
         </section>
       )}
 
@@ -263,8 +265,8 @@ function CustomQueuePanel({ orderData, filter, onToast }) {
             <h2>Up next <span className="count">{queuedList.length}</span></h2>
             <span className="stage-hint">Drag to reorder</span>
           </div>
-          <div className="rows">
-            {queuedList.map((rec, idx) => (
+          <VirtualRows records={queuedList}>
+            {(rec, idx) => (
               <TrackRow
                 key={rec.id || rec.item.id}
                 rec={rec}
@@ -276,8 +278,8 @@ function CustomQueuePanel({ orderData, filter, onToast }) {
                 isDragTarget={dragTargetId === (rec.id || rec.item.id)}
                 onToast={onToast}
               />
-            ))}
-          </div>
+            )}
+          </VirtualRows>
         </section>
       )}
 
@@ -298,11 +300,11 @@ function CustomQueuePanel({ orderData, filter, onToast }) {
               <Icon name="play" size={12} />Resume all
             </button>
           </div>
-          <div className="rows">
-            {pausedList.map((rec) => (
+          <VirtualRows records={pausedList}>
+            {(rec) => (
               <TrackRow key={rec.id || rec.item.id} rec={rec} onToast={onToast} />
-            ))}
-          </div>
+            )}
+          </VirtualRows>
         </section>
       )}
 
@@ -312,11 +314,11 @@ function CustomQueuePanel({ orderData, filter, onToast }) {
             <span className="pill">Finished</span>
             <h2>Downloaded &amp; missing <span className="count">{restList.length}</span></h2>
           </div>
-          <div className="rows">
-            {restList.map((rec) => (
+          <VirtualRows records={restList}>
+            {(rec) => (
               <TrackRow key={rec.id || rec.item.id} rec={rec} onToast={onToast} />
-            ))}
-          </div>
+            )}
+          </VirtualRows>
         </section>
       )}
     </div>
@@ -495,9 +497,9 @@ function Group({ group, collapsed, onToggle, onRemove, onToast }) {
       </div>
 
       {!collapsed && (
-        <div className="rows" id={bodyId}>
-          {group.records.map((rec) => <TrackRow key={rec.id || rec.item.id} rec={rec} onToast={onToast} />)}
-        </div>
+        <VirtualRows records={group.records} id={bodyId}>
+          {(rec) => <TrackRow key={rec.id || rec.item.id} rec={rec} onToast={onToast} />}
+        </VirtualRows>
       )}
     </section>
   );

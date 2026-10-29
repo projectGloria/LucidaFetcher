@@ -94,7 +94,7 @@ function previewError(out) {
   if (out?.error) return out.error;
   if (out?.kind === 'profile') return 'Use the Spotify profile tab for profile links.';
   if (!out?.group || !Array.isArray(out.results) || !out.results.length) {
-    return 'Paste a Spotify or Deezer playlist, album, or track link.';
+    return 'Paste a Spotify, Deezer, Tidal, or Qobuz playlist, album, or track link.';
   }
   return null;
 }
@@ -660,6 +660,7 @@ export default function AddView({ onToast }) {
       const error = previewError(out);
       if (error) { onToast(error, 'err'); return; }
       setPreview(out);
+      if (out.warning) onToast(out.warning, 'err');
       setQueued(new Set());
       history.remember({ kind: 'link', label: url, name: out.name, count: out.results.length,
                  image: out.group?.artworkUrl || '' });
@@ -1243,7 +1244,7 @@ export default function AddView({ onToast }) {
               <div className="empty-icon"><Icon name="music" size={24} /></div>
               <h2>Find music in lossless FLAC</h2>
               <p>
-                Search by artist, album or song — or paste a Spotify or Deezer playlist,
+                Search by artist, album or song — or paste a Spotify, Deezer, Tidal, or Qobuz playlist,
                 album or track link to review it before anything is downloaded.
               </p>
             </div>
@@ -1328,6 +1329,7 @@ export default function AddView({ onToast }) {
 
           {mode === 'search' && !artistView && preview && !preview.error && (
             <section className="results-section">
+              {preview.warning && <p className="banner warn-text" role="status">{preview.warning}</p>}
               <div className="results-heading">
                 <div className="playlist-identity">
                   {preview.group.artworkUrl ? <img src={preview.group.artworkUrl} alt="" /> : <EmptyArtwork kind="playlist" />}

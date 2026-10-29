@@ -245,6 +245,15 @@ export class DownloadTracker {
 
 export function ipcAdapter(ipcRenderer, tracker) {
   return {
+    async providerRequest(id, operation, args, signal) {
+      const requestId = crypto.randomUUID();
+      const abort = () => ipcRenderer.send('provider-request-cancel', requestId);
+      signal?.throwIfAborted();
+      signal?.addEventListener('abort', abort, { once: true });
+      try { return await ipcRenderer.invoke('provider-request', { id, operation, args, requestId }); }
+      finally { signal?.removeEventListener('abort', abort); }
+    },
+    startProviderDownload: payload => ipcRenderer.invoke('provider-download', payload),
     onSourceResponse(webContentsId, itemId, cb) {
       const handler = (_event, response) => {
         if (response?.webContentsId === webContentsId && response.itemId === itemId) cb(response);
@@ -280,4 +289,36 @@ export function ensureWorkerViews(container, count, { partition } = {}) {
     views.push(wv);
   }
   return views.slice(0, count);
+}
+
+export function lazyWorkerView(container) {
+  let element, adapter;
+  const get = () => {
+    if (!adapter) {
+      const holder = document.createElement('div');
+      element = ensureWorkerViews(holder, 1)[0];
+      container.appendChild(element);
+      adapter = viewAdapter(element);
+    }
+    return adapter;
+  };
+  return {
+    get webContentsId() { return get().webContentsId; },
+    async ready(signal) {
+      get();
+      const deadline = Date.now() + 10000;
+      while (!adapter?.webContentsId) {
+        signal?.throwIfAborted();
+        if (Date.now() >= deadline) throw new Error('Browser worker did not attach');
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      signal?.throwIfAborted();
+    },
+    navigate: (...args) => get().navigate(...args),
+    onDomReady: (...args) => get().onDomReady(...args),
+    executeJavaScript: (...args) => get().executeJavaScript(...args),
+    currentUrl: () => adapter?.currentUrl() || null,
+    reset() { adapter?.reset(); },
+    dispose() { element?.remove(); element = null; adapter = null; },
+  };
 }

@@ -7,7 +7,7 @@
 
 import { Controller } from './controller.mjs';
 import { Worker } from './worker.mjs';
-import { viewAdapter, ipcAdapter, DownloadTracker, ensureWorkerViews } from './electron-bridge.mjs';
+import { lazyWorkerView, ipcAdapter, DownloadTracker } from './electron-bridge.mjs';
 import { collectProfiles, reportPayload, profileSignature } from './profile-report.mjs';
 import { assignPlaylistFiles } from './profile-paths.mjs';
 import { buildSearchVariants } from './variants.mjs';
@@ -65,15 +65,14 @@ export function startEngine(opts) {
       controller._emit();
     } };
 
-  // One webview per slot, created up front. Building them lazily would put a
-  // page load on the critical path of the first download in each slot.
-  const views = ensureWorkerViews(container, concurrency);
-  const workers = views.map((view, slot) => new Worker({
-    slot, view: viewAdapter(view), ipc, log, pipeline, ...accessDeps,
-  }));
+  const makeWorker = slot => new Worker({ slot, view: lazyWorkerView(container), ipc, log, pipeline, ...accessDeps });
+  const workers = Array.from({ length: concurrency }, (_, slot) => makeWorker(slot));
 
   const controller = new Controller({
     getWorker: (slot) => workers[slot],
+    onSlotIdle: slot => {
+      if (slot >= controller.pool.concurrency) { workers[slot]?.view.dispose(); workers[slot] = null; }
+    },
     services,
     concurrency,
     log,
@@ -308,16 +307,15 @@ export function startEngine(opts) {
 
   if (onChange) cleanups.push(controller.subscribe(() => onChange(controller)));
 
-  // Growing the pool needs more webviews; shrinking leaves the extra ones
-  // parked rather than destroying a view a slot may still be finishing in.
+  // Busy surplus slots retire only after their chain returns. Browser pages
+  // are allocated on first scrape, so API-only work never starts a renderer.
   const baseSetConcurrency = controller.setConcurrency.bind(controller);
   controller.setConcurrency = (n) => {
     const want = Math.max(1, n | 0);
-    const all = ensureWorkerViews(container, Math.max(want, workers.length));
-    for (let i = workers.length; i < want; i++) {
-      workers[i] = new Worker({ slot: i, view: viewAdapter(all[i]), ipc, log, pipeline, ...accessDeps });
-    }
+    for (let i = 0; i < want; i++) if (!workers[i]) workers[i] = makeWorker(i);
     baseSetConcurrency(want);
+    const busy = new Set([...controller.pool.active.values()].map(run => run.slot));
+    for (let i = want; i < workers.length; i++) if (!busy.has(i)) { workers[i]?.view.dispose(); workers[i] = null; }
   };
 
   cleanups.push(attachPersistence(controller, ipcRenderer, log));
@@ -468,18 +466,21 @@ export function attachPersistence(controller, ipcRenderer, log = () => {}) {
         const keys = new Set(playlists.flatMap(pl => pl.trackKeys));
         controller.addProfile(profile, playlists, new Map([...profileTracks].filter(([key]) => keys.has(key))), { queue: false });
       }
-      for (const item of prepared.slice(0, snap.items.length)) {
-        if (item.status === 'completed') continue;
-        controller.add(item);
+      // Restore memberships in one batch. Adding one item at a time rebuilds
+      // Pool.submit's duplicate set for every row (quadratic on large queues).
+      // Start paused so no skipped/cancelled record is ever submitted briefly.
+      const loose = prepared.slice(0, snap.items.length).filter(item => item.status !== 'completed');
+      controller.add(loose, { paused: true });
+      for (const item of loose) {
         const rec = controller.getItem(item.id);
         if (!rec) continue;
         rec.status = item.status;
         rec.statusText = item.statusText || (item.status === 'skipped' ? 'Missing from an earlier run' : item.status === 'paused' ? 'Paused' : 'Waiting in queue');
         rec.tried = item.tried || [];
-        if (['skipped', 'cancelled', 'paused'].includes(item.status)) controller.pool.cancel(item.id);
       }
       const resumeIds = new Set(toResume);
-      controller.pool.submit([...controller.tracks.values()].filter(rec => rec.status === 'queued' && !resumeIds.has(rec.item.id)).map(rec => rec.item));
+      controller.pool.submit([...controller.items.values(), ...controller.tracks.values()]
+        .filter(rec => rec.status === 'queued' && !resumeIds.has(rec.item.id)).map(rec => rec.item));
       for (const id of toResume) {
         const item = controller.getItem(id)?.item;
         if (!item || !controller.adoptTransfer(item, byId.get(id))) continue;

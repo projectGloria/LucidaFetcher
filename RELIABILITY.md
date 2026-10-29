@@ -1,5 +1,34 @@
 # Reliability audit — 2026-10-04
 
+## Catalog expansion and queue performance — 2026-10-29
+
+- Tidal and Qobuz public catalog imports preserve order, recording identifiers,
+  durations and track artwork where supplied. Incomplete or unconfirmed totals
+  are reported in the preview. Public pages can expose fewer tracks than the
+  complete catalog; a successful preview is not proof of a complete playlist.
+- Direct HiFi Tidal and Squid Qobuz adapters are separate from imports. Both
+  remain disabled: the tested hosts failed DNS qualification on October 28.
+  Squid's current response contract also remains unverified. Existing source
+  selections and request pacing are preserved. HiFi shares Monochrome's budget.
+- Transfers stage files under owned `.lucida-<uuid>.flac` paths. Files are
+  checked for FLAC structure and recording identity, supplied with decodable
+  matching artwork when absent, checked again, and exclusively published.
+  Artwork edits preserve encoded audio bytes. Container checks cannot establish
+  the upstream encoding history, and are not a complete audio decoder audit.
+  Exclusive publication currently requires a filesystem supporting hard links
+  (the tested Windows destination is NTFS).
+- Metadata/artwork caches are bounded and deduplicate in-flight requests.
+  Signed media URLs do not enter these caches or diagnostics. Active transfer
+  resume records retain the URL information Chromium needs to resume a transfer.
+- Both queue layouts virtualize expanded track rows. Progress uses its separate
+  channel; item subscriptions avoid rerendering unrelated rows. Restore batches
+  queue insertion. Browser views are allocated lazily and surplus workers retire
+  after their active work finishes. API-only work does not allocate a view.
+
+See `review/source-expansion-2026-10-29.md` for reproducible measurements,
+validation commands, and live-provider limitations. Fixture success does not
+qualify a remote download provider.
+
 ## Source access — 2026-10-26
 
 - Workers share one active scrape per site, with at least two seconds between

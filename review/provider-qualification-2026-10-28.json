@@ -1,0 +1,72 @@
+{
+  "date": "2026-10-28",
+  "providers": [
+    {
+      "id": "hifi-tidal",
+      "qualified": false,
+      "reason": "ENOTFOUND"
+    },
+    {
+      "id": "squid-qobuz",
+      "qualified": false,
+      "reason": "ENOTFOUND"
+    }
+  ],
+  "imports": [
+    {
+      "service": "tidal",
+      "type": "track",
+      "url": "https://tidal.com/browse/track/48717877",
+      "tracks": 1,
+      "complete": true,
+      "name": "Waiting For Love (Marshmello Remix)",
+      "withArtwork": 1,
+      "withDuration": 1
+    },
+    {
+      "service": "tidal",
+      "type": "album",
+      "url": "https://tidal.com/album/48717868",
+      "tracks": 6,
+      "complete": false,
+      "name": "Waiting For Love (Remixes)",
+      "withArtwork": 6,
+      "withDuration": 6
+    },
+    {
+      "service": "tidal",
+      "type": "playlist",
+      "url": "https://tidal.com/playlist/c989958b-c60a-4bdc-b58f-25236c6c1e8a",
+      "tracks": 50,
+      "complete": false,
+      "name": "TIDAL Topp 100 Norge",
+      "withArtwork": 50,
+      "withDuration": 50
+    },
+    {
+      "service": "qobuz",
+      "type": "album",
+      "url": "https://www.qobuz.com/us-en/album/random-access-memories-daft-punk/0886443927087",
+      "tracks": 13,
+      "complete": false,
+      "name": "Random Access Memories",
+      "withArtwork": 13,
+      "withDuration": 13
+    },
+    {
+      "service": "qobuz",
+      "type": "track",
+      "error": "Public catalog HTTP 404"
+    },
+    {
+      "service": "qobuz",
+      "type": "playlist",
+      "url": "https://www.qobuz.com/gb-en/playlists/qobuz-top-50/2340494",
+      "tracks": 50,
+      "complete": true,
+      "name": "Qobuz Top 50",
+      "withArtwork": 50,
+      "withDuration": 50
+    }
+  ]
+}

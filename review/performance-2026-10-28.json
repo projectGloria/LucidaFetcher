@@ -1,0 +1,302 @@
+{
+  "baseline": "938ce0b9ddf7da41de6bc6372d7378620f2dfddb",
+  "note": "Original QueueView versus virtualized QueueView, same current engine and row components; controlled render benchmark, not network throughput.",
+  "results": [
+    {
+      "count": 500,
+      "baseline": true,
+      "layout": "grouped",
+      "mountMs": 195.79999999701977,
+      "filterMs": 32.099999994039536,
+      "rows": 500,
+      "filteredRows": 50,
+      "bottomRows": 500,
+      "heapBytes": 12700000,
+      "mainCpuMicros": {
+        "user": 15000,
+        "system": 78000
+      },
+      "processes": [
+        {
+          "type": "Browser",
+          "cpuPercent": 0,
+          "workingSetKB": 101432
+        },
+        {
+          "type": "GPU",
+          "cpuPercent": 0,
+          "workingSetKB": 80708
+        },
+        {
+          "type": "Utility",
+          "cpuPercent": 0,
+          "workingSetKB": 46172
+        },
+        {
+          "type": "Tab",
+          "cpuPercent": 0,
+          "workingSetKB": 153436
+        }
+      ]
+    },
+    {
+      "count": 500,
+      "baseline": false,
+      "layout": "grouped",
+      "mountMs": 30.5,
+      "filterMs": 9.5,
+      "rows": 19,
+      "filteredRows": 17,
+      "bottomRows": 20,
+      "heapBytes": 12700000,
+      "mainCpuMicros": {
+        "user": 0,
+        "system": 31000
+      },
+      "processes": [
+        {
+          "type": "Browser",
+          "cpuPercent": -5.535423845623708,
+          "workingSetKB": 150828
+        },
+        {
+          "type": "GPU",
+          "cpuPercent": 1.634425614959701,
+          "workingSetKB": 85324
+        },
+        {
+          "type": "Utility",
+          "cpuPercent": 0.8673444072618214,
+          "workingSetKB": 46172
+        },
+        {
+          "type": "Tab",
+          "cpuPercent": 8.291467326601701,
+          "workingSetKB": 169020
+        }
+      ]
+    },
+    {
+      "count": 500,
+      "baseline": true,
+      "layout": "custom",
+      "mountMs": 112.70000000298023,
+      "filterMs": 27.400000005960464,
+      "rows": 500,
+      "filteredRows": 50,
+      "bottomRows": 500,
+      "heapBytes": 12700000,
+      "mainCpuMicros": {
+        "user": 32000,
+        "system": 78000
+      },
+      "processes": [
+        {
+          "type": "Browser",
+          "cpuPercent": 1.2053014677666922,
+          "workingSetKB": 146060
+        },
+        {
+          "type": "GPU",
+          "cpuPercent": 0.5618426023651323,
+          "workingSetKB": 85444
+        },
+        {
+          "type": "Utility",
+          "cpuPercent": 0,
+          "workingSetKB": 46172
+        },
+        {
+          "type": "Tab",
+          "cpuPercent": 9.513136509345417,
+          "workingSetKB": 197904
+        }
+      ]
+    },
+    {
+      "count": 500,
+      "baseline": false,
+      "layout": "custom",
+      "mountMs": 20.200000002980232,
+      "filterMs": 7,
+      "rows": 20,
+      "filteredRows": 20,
+      "bottomRows": 21,
+      "heapBytes": 12700000,
+      "mainCpuMicros": {
+        "user": 62000,
+        "system": 31000
+      },
+      "processes": [
+        {
+          "type": "Browser",
+          "cpuPercent": 1.4864190508896569,
+          "workingSetKB": 106544
+        },
+        {
+          "type": "GPU",
+          "cpuPercent": 0.8687806647407528,
+          "workingSetKB": 85448
+        },
+        {
+          "type": "Utility",
+          "cpuPercent": 0,
+          "workingSetKB": 46172
+        },
+        {
+          "type": "Tab",
+          "cpuPercent": 3.6393389848696214,
+          "workingSetKB": 198352
+        }
+      ]
+    },
+    {
+      "count": 5000,
+      "baseline": true,
+      "layout": "grouped",
+      "mountMs": 662.2999999970198,
+      "filterMs": 178.29999999701977,
+      "rows": 5000,
+      "filteredRows": 500,
+      "bottomRows": 5000,
+      "heapBytes": 12700000,
+      "mainCpuMicros": {
+        "user": 16000,
+        "system": 0
+      },
+      "processes": [
+        {
+          "type": "Browser",
+          "cpuPercent": 0.10417502742328169,
+          "workingSetKB": 165732
+        },
+        {
+          "type": "GPU",
+          "cpuPercent": 0.11920686676141906,
+          "workingSetKB": 85452
+        },
+        {
+          "type": "Utility",
+          "cpuPercent": 0,
+          "workingSetKB": 46172
+        },
+        {
+          "type": "Tab",
+          "cpuPercent": 10.844580435462307,
+          "workingSetKB": 530128
+        }
+      ]
+    },
+    {
+      "count": 5000,
+      "baseline": false,
+      "layout": "grouped",
+      "mountMs": 161.40000000596046,
+      "filterMs": 13.399999991059303,
+      "rows": 19,
+      "filteredRows": 17,
+      "bottomRows": 20,
+      "heapBytes": 12700000,
+      "mainCpuMicros": {
+        "user": 15000,
+        "system": 16000
+      },
+      "processes": [
+        {
+          "type": "Browser",
+          "cpuPercent": 0.5091705668008257,
+          "workingSetKB": 215052
+        },
+        {
+          "type": "GPU",
+          "cpuPercent": 0.45931216279056736,
+          "workingSetKB": 85452
+        },
+        {
+          "type": "Utility",
+          "cpuPercent": 0,
+          "workingSetKB": 46172
+        },
+        {
+          "type": "Tab",
+          "cpuPercent": 5.957653041207067,
+          "workingSetKB": 527712
+        }
+      ]
+    },
+    {
+      "count": 5000,
+      "baseline": true,
+      "layout": "custom",
+      "mountMs": 651.5,
+      "filterMs": 135.79999999701977,
+      "rows": 5000,
+      "filteredRows": 500,
+      "bottomRows": 5000,
+      "heapBytes": 12700000,
+      "mainCpuMicros": {
+        "user": 79000,
+        "system": 31000
+      },
+      "processes": [
+        {
+          "type": "Browser",
+          "cpuPercent": 0.34997728850026333,
+          "workingSetKB": 210216
+        },
+        {
+          "type": "GPU",
+          "cpuPercent": 0.21918158462306128,
+          "workingSetKB": 85692
+        },
+        {
+          "type": "Utility",
+          "cpuPercent": 0.0005007263477491467,
+          "workingSetKB": 46188
+        },
+        {
+          "type": "Tab",
+          "cpuPercent": 8.454644003517934,
+          "workingSetKB": 747540
+        }
+      ]
+    },
+    {
+      "count": 5000,
+      "baseline": false,
+      "layout": "custom",
+      "mountMs": 136.20000000298023,
+      "filterMs": 8.599999994039536,
+      "rows": 20,
+      "filteredRows": 20,
+      "bottomRows": 21,
+      "heapBytes": 12700000,
+      "mainCpuMicros": {
+        "user": 46000,
+        "system": 15000
+      },
+      "processes": [
+        {
+          "type": "Browser",
+          "cpuPercent": 1.2055574240936535,
+          "workingSetKB": 131320
+        },
+        {
+          "type": "GPU",
+          "cpuPercent": 0.6158204158021074,
+          "workingSetKB": 85692
+        },
+        {
+          "type": "Utility",
+          "cpuPercent": 0,
+          "workingSetKB": 46188
+        },
+        {
+          "type": "Tab",
+          "cpuPercent": 5.59888840063148,
+          "workingSetKB": 762220
+        }
+      ]
+    }
+  ]
+}

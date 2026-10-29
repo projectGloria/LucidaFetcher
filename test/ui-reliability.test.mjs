@@ -184,7 +184,7 @@ test('link preview rejects plain text and incomplete results before they reach R
   const scope = {};
   vm.runInNewContext(source.slice(source.indexOf('function previewError('), source.indexOf('async function withoutExisting(')), scope);
   const text = await createSources().resolve('Artist - Song');
-  assert.match(scope.previewError(text), /Paste a Spotify or Deezer/);
+  assert.match(scope.previewError(text), /Paste a Spotify, Deezer, Tidal, or Qobuz/);
   for (const result of [null, {}, { results: [] }, { group: {}, results: [] }]) assert.ok(scope.previewError(result));
   assert.match(scope.previewError({ kind: 'profile' }), /profile tab/);
   assert.equal(scope.previewError({ error: 'Provider unavailable' }), 'Provider unavailable');

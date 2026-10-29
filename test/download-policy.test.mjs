@@ -6,7 +6,9 @@ import { DownloadTracker } from '../src/engine/electron-bridge.mjs';
 
 const main = fs.readFileSync(new URL('../main.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 function policies(config = {}, fileSystem = fs) {
-  const sandbox = { fs: fileSystem, Buffer, config };
+  const sandbox = { fs: fileSystem, Buffer, config, nativeImage: {
+    createFromBuffer: bytes => ({ isEmpty: () => !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) }),
+  } };
   vm.runInNewContext(main.slice(main.indexOf('function downloadSourceEnabled('), main.indexOf('const mediaTransfers =')), sandbox);
   return sandbox;
 }
@@ -46,7 +48,7 @@ test('Chromium rejects disabled, blocked, and non-FLAC transfers before saving',
   ]) {
     let rejected = false;
     const messages = [];
-    const sandbox = { ...policies({ fallbackServices: ['qobuz'] }), URL,
+    const sandbox = { ...policies({ fallbackServices: ['qobuz'] }), URL, providerDownloads: new Map(),
       MEDIA_HOSTS: /(^|\.)(soundcloud\.com|snd\.sc|youtube\.com|youtu\.be)$/i,
       takeDownloadContext: () => ({ itemId: 'one', attemptService: service }),
       safeBaseName: s => s, forgetTransfer() {}, logEvent() {}, toUI: (...args) => messages.push(args),
@@ -84,13 +86,18 @@ function flacBytes(blocks) {
   // blocks: [{ type, last?, bodyLen }]  (no actual body needed - readSync is mocked)
   const parts = [Buffer.from('fLaC', 'ascii')];
   for (const b of blocks) {
+    let body = Buffer.alloc(b.bodyLen);
+    if (b.type === 6) {
+      const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a3ioAAAAASUVORK5CYII=', 'base64');
+      body = Buffer.alloc(32 + 9 + png.length);
+      body.writeUInt32BE(3); body.writeUInt32BE(9, 4); body.write('image/png', 8);
+      body.writeUInt32BE(1, 21); body.writeUInt32BE(1, 25); body.writeUInt32BE(png.length, 37); png.copy(body, 41);
+    }
     const h = Buffer.alloc(4);
     h[0] = (b.type & 0x7f) | (b.last ? 0x80 : 0);
-    h[1] = (b.bodyLen >> 16) & 0xff;
-    h[2] = (b.bodyLen >> 8) & 0xff;
-    h[3] = b.bodyLen & 0xff;
+    h.writeUIntBE(body.length, 1, 3);
     parts.push(h);
-    parts.push(Buffer.alloc(b.bodyLen)); // dummy body
+    parts.push(body);
   }
   return Buffer.concat(parts);
 }

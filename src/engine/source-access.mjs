@@ -46,7 +46,7 @@ export class SourceAccess {
     this.cache = new Map();
   }
 
-  key(step) { return step.source === 'monochrome' ? 'monochrome' : 'lucida'; }
+  key(step) { return ['monochrome', 'hifi-tidal'].includes(step.source) ? 'monochrome' : step.source === 'squid-qobuz' ? 'squid-qobuz' : 'lucida'; }
 
   state(key) {
     if (!this.states.has(key)) this.states.set(key, { active: false, queue: [], next: 0, strikes: 0 });

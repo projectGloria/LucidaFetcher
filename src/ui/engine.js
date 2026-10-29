@@ -123,6 +123,7 @@ function makeScraper() {
 // Playlist import. `fetch` reaches the public embed endpoints directly; Deezer's
 // API goes through the main process, which is not subject to CORS.
 export const sources = createSources({
+  catalogRead: isElectron ? (url, cursor) => ipc.invoke('catalog-read', { url, cursor }) : null,
   httpJson: (url) => (ipc ? ipc.invoke('http-json', url) : Promise.reject(new Error('unavailable'))),
   scraper: isElectron ? makeScraper() : null,
   cache: isElectron ? {

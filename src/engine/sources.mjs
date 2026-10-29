@@ -9,6 +9,8 @@
 import { buildSearchQuery } from './variants.mjs';
 import { lucidaSearchUrl } from './worker.mjs';
 import { createSpotifyMetadata } from './spotify-metadata.mjs';
+import { classifyCatalogUrl, readCatalog, scrapePublicCatalog, parseCatalogHtml } from './public-catalog.mjs';
+import { resourceCache } from './resource-cache.mjs';
 
 // Reserved DOS device names: illegal as a directory on Windows with or without
 // an extension, so a playlist called "AUX" has nowhere to be written. Mirrored
@@ -159,6 +161,8 @@ export function classifyInput(raw, mode = 'auto') {
 
   let url;
   try { url = new URL(q); } catch { /* track names are not URLs */ }
+  const catalog = classifyCatalogUrl(q);
+  if (catalog) return { ...catalog, kind: 'public-catalog' };
   let m = url?.hostname === 'open.spotify.com' && /^\/(?:intl-[a-z]{2}\/)?(?:embed\/)?(playlist|album|track)\/([A-Za-z0-9]+)\/?$/i.exec(url.pathname);
   if (m) return { kind: m[1].toLowerCase() === 'track' ? 'spotify-track' : 'spotify-playlist', id: m[2], url: q.split(/[?#]/)[0], type: m[1].toLowerCase() };
 
@@ -252,9 +256,17 @@ export const SPOTIFY_DESKTOP_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
   + ' (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 
-export function createSources({ fetch: doFetch, httpJson, scraper, cache, log = () => {}, spotifyTiming = {} } = {}) {
+export function createSources({ fetch: doFetch, httpJson, catalogRead, scraper, cache, log = () => {}, spotifyTiming = {} } = {}) {
   const f = doFetch || (typeof fetch === 'function' ? fetch.bind(globalThis) : null);
   const spotifyEmbedData = createSpotifyMetadata({ fetch: f, cache, log, ...spotifyTiming });
+  const catalogPage = resourceCache(async url => {
+    if (!scraper) throw new Error('Public catalog import requires the desktop app.');
+    const ref = classifyCatalogUrl(url);
+    const pageUrl = ref.service === 'tidal' && ref.type !== 'track' ? `https://embed.tidal.com/${ref.type}s/${ref.id}` : ref.url;
+    const page = await scraper.run(pageUrl, `(${scrapePublicCatalog.toString()})(${JSON.stringify(ref)})`, SPOTIFY_DESKTOP_UA);
+    if (!page?.tracks?.length) throw new Error('No public tracks found; the page may be private or unavailable.');
+    return page;
+  }, { concurrency: 1, maxEntries: 20, ttl: 60000, sizeOf: value => JSON.stringify(value).length * 2 });
   const trackArtwork = new Map();
   const artworkQueue = [];
   let activeArtwork = 0;
@@ -501,6 +513,23 @@ export function createSources({ fetch: doFetch, httpJson, scraper, cache, log = 
   async function resolve(input, opts = {}) {
     const c = classifyInput(input, opts.mode);
     switch (c.kind) {
+      case 'public-catalog': {
+        try {
+          const data = await readCatalog(c, { signal: opts.signal,
+            readPage: async (_ref, cursor) => {
+              if (!catalogRead) return catalogPage(c.url);
+              const response = await catalogRead(c.url, cursor);
+              return response.page || parseCatalogHtml(response.html, c);
+            } });
+          const group = { id: `${c.service}-${c.type}-${c.id}`, name: data.name, folderName: sanitizeFolder(data.name), artworkUrl: data.image, service: c.service };
+          return { kind: c.kind, name: data.name, group, warning: data.warning, complete: data.complete,
+            results: data.tracks.map(t => buildTrackResult(t.title, t.artist, t.image, group, 'qobuz', {
+              service: c.service, trackId: t.id, isrc: t.isrc, album: t.album, durationSec: t.durationSec,
+              // Playlist art is not evidence of the recording's cover.
+              image: t.image || '',
+            })) };
+        } catch (error) { return { error: `${c.service} import failed: ${error.message}` }; }
+      }
       case 'spotify-track': return { ...(await spotifyTrack(c.url)), kind: c.kind };
       case 'deezer-track': return { ...(await deezerTrack(c.id)), kind: c.kind };
       case 'spotify-playlist': return { ...(await spotifyPlaylist(c.url, opts)), kind: c.kind };
@@ -509,7 +538,7 @@ export function createSources({ fetch: doFetch, httpJson, scraper, cache, log = 
       case 'profile':          return { ...c, kind: 'profile' };
       case 'text':             return { kind: 'text', text: c.text };
       case 'empty':            return { error: 'Nothing to import.' };
-      default:                 return { error: 'That link is not a Spotify or Deezer link.' };
+      default:                 return { error: 'Use a Spotify, Deezer, Tidal, or Qobuz track, album, or playlist link.' };
     }
   }
 

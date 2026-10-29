@@ -12,6 +12,7 @@ import { buildLucidaScript } from './cascade-lucida.mjs';
 import { buildMonochromeScript } from './cascade-monochrome.mjs';
 import { SOURCE_MONOCHROME, SOURCE_SOUNDCLOUD, SOURCE_YOUTUBE, SOURCE_DIRECT } from './chain.mjs';
 import { monochromeConfigScript } from './source-access.mjs';
+import { API_PROVIDERS, createProvider, matchRecording } from './providers.mjs';
 
 export const DEFAULTS = {
   domReadyTimeoutMs: 45000,
@@ -96,6 +97,7 @@ export class Worker {
     this.access = deps.access;
     this.onWait = deps.onWait || (() => {});
     this.getMonochromeApiUrl = deps.getMonochromeApiUrl;
+    this.providers = deps.providers || API_PROVIDERS;
     // With the pipeline on, a scraped attempt ends when the transfer STARTS,
     // not when the file lands: the page has done its job by then and the bytes
     // are the main process's business. The caller waits for the file instead,
@@ -111,6 +113,7 @@ export class Worker {
    */
   async run(item, step, signal) {
     if (signal && signal.aborted) throw new Aborted();
+    if (API_PROVIDERS[step.source]) return this._runApi(item, step, signal);
     const started = Date.now();
     const base = { step, slot: this.slot };
     const cancel = () => {
@@ -132,6 +135,7 @@ export class Worker {
       }
       this.onWait(item.id, step, 0, false);
       if (signal?.aborted) throw new Aborted();
+      await this.view.ready?.(signal);
       let networkResult;
       offResponse = this.ipc.onSourceResponse?.(this.view.webContentsId, item.id, response => {
         if (networkResult) return;
@@ -180,6 +184,42 @@ export class Worker {
     return this._runScraped(item, step, signal);
   }
 
+  async _runApi(item, step, signal) {
+    const descriptor = this.providers[step.source];
+    if (!descriptor.qualified) return { outcome: 'provider-failed', message: descriptor.reason };
+    let release;
+    const source = this.access?.key(step);
+    const cancel = () => this.ipc.cancelDownload?.(item.id);
+    signal?.addEventListener('abort', cancel, { once: true });
+    try {
+      release = await this.access?.acquire(source, signal);
+      const provider = createProvider(step.source, { request: async (...args) => {
+        await this.access?.pace(source, signal, (ms, limited) => this.onWait(item.id, step, ms, limited));
+        return this.ipc.providerRequest(...args);
+      } });
+      const candidates = await provider.search(item, item.isrc || step.query, signal);
+      let candidate = matchRecording(item, candidates);
+      if (!candidate && item.isrc) candidate = matchRecording(item, await provider.search(item, step.query, signal));
+      if (!candidate) return { outcome: 'no-match' };
+      const resolved = await provider.resolve(candidate, signal);
+      signal?.throwIfAborted();
+      await this.ipc.startProviderDownload({ url: resolved.url, itemId: item.id, service: step.service,
+        title: item.title, artist: item.artist, durationSec: item.durationSec, isrc: item.isrc,
+        key: item.key, folderName: item.folderName, artworkUrl: item.groupArtwork,
+        trackArtworkUrl: resolved.artworkUrl || item.image, originalService: item.originalService });
+      signal?.throwIfAborted();
+      const done = this.pipeline ? await this.ipc.awaitDownloadStart(item.id, signal) : await this.ipc.awaitDownload(item.id, signal);
+      if (!done) return { outcome: 'no-download-started' };
+      this.access?.healthy(source);
+      return this.pipeline ? { outcome: 'transferring' } : done.status === 'completed'
+        ? { outcome: 'completed', ...done } : { outcome: 'download-failed', message: done.status };
+    } catch (error) {
+      if (signal?.aborted) throw new Aborted();
+      if (error.outcome === 'rate-limited') this.access?.limited(source, error.retryAfter);
+      return { outcome: error.outcome || 'provider-failed', message: error.message };
+    } finally { release?.(); signal?.removeEventListener('abort', cancel); }
+  }
+
   async _runScraped(item, step, signal) {
     const isMono = step.source === SOURCE_MONOCHROME;
     const searchUrl = isMono ? urlForStep(step) : lucidaSearchUrl(step.query, step.service, this.access?.regions[step.service]);
@@ -195,6 +235,7 @@ export class Worker {
       itemId: item.id,
       folderName: item.folderName,
       artworkUrl: item.groupArtwork,
+      trackArtworkUrl: item.image || null,
       key: item.key,
       title: item.title,
       artist: item.artist,

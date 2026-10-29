@@ -13,6 +13,7 @@ export const SERVICE_LABELS = {
   qobuz: 'Qobuz', tidal: 'Tidal', amazon: 'Amazon Music', deezer: 'Deezer',
   soundcloud: 'SoundCloud', spotify: 'Spotify', napster: 'Napster', yandex: 'Yandex Music',
   monochrome: 'Monochrome', youtube: 'YouTube',
+  'hifi-tidal': 'HiFi Tidal', 'squid-qobuz': 'Squid Qobuz',
 };
 
 export function serviceLabel(service) {

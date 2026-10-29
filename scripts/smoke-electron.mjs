@@ -115,6 +115,8 @@ try {
     '-c:a', 'flac', '-c:v', 'png', '-disposition:v', 'attached_pic', path.join(sandbox, 'fixture.flac')]);
   await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', path.join(sandbox, 'fixture.flac'),
     '-map', '0', '-c', 'copy', '-metadata', 'title=Other (Remix)', '-metadata', 'artist=Fixture', path.join(sandbox, 'wrong.flac')]);
+  await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', path.join(sandbox, 'fixture.flac'),
+    '-map', '0:a', '-c', 'copy', path.join(sandbox, 'without-art.flac')]);
   await fs.writeFile(path.join(sandbox, 'artwork.rgb'), randomBytes(1200 * 1200 * 3));
   await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'rawvideo', '-pixel_format', 'rgb24', '-video_size', '1200x1200',
     '-i', path.join(sandbox, 'artwork.rgb'), '-frames:v', '1', path.join(sandbox, 'large.png')]);
@@ -256,7 +258,7 @@ try {
     if (document.querySelector('.main [role="alert"]:not(.toast)') || !document.querySelector('#music-search') || !document.querySelector('.sidebar')) {
       throw new Error('An unsupported link broke the interface');
     }
-    if (![...document.querySelectorAll('.toast.err')].some(toast => toast.textContent.includes('not a Spotify or Deezer'))) {
+    if (![...document.querySelectorAll('.toast.err')].some(toast => toast.textContent.includes('Spotify, Deezer, Tidal, or Qobuz'))) {
       throw new Error('Unsupported link did not explain which links are supported');
     }
   };
@@ -279,11 +281,12 @@ try {
       await Promise.all([...container.querySelectorAll('webview')].map(view => new Promise(resolve => {
         view.addEventListener('dom-ready', resolve, { once: true });
       })));
-      c.add(['Retry', 'Other', 'Large'].map(title => ({ id: title, key: title, title, artist: 'Fixture', searchVariants: [title] })));
+      c.add(['Retry', 'Other', 'Large', 'Artwork'].map(title => ({ id: title, key: title, title, artist: 'Fixture',
+        image: title === 'Artwork' ? 'https://art.fixture/track' : null, searchVariants: [title] })));
       const result = await new Promise((resolve, reject) => {
         const timer = setTimeout(() => { off(); reject(new Error(JSON.stringify(c.getItems()))); }, 20000);
         const off = c.subscribe(() => {
-          if (c.stats.completed === 3) { clearTimeout(timer); off(); resolve(c.getItems().map(rec => rec.result)); }
+          if (c.stats.completed === 4) { clearTimeout(timer); off(); resolve(c.getItems().map(rec => rec.result)); }
         });
       });
       c.pause(); c.resume();
@@ -352,6 +355,11 @@ try {
         res.writeHead(200, { 'Content-Type': 'audio/flac', 'Content-Disposition': 'attachment; filename="large.flac"', 'Content-Length': large.length });
         res.end(large); return;
       }
+      if (url.pathname === '/without-art.flac') {
+        const bytes = fs.readFileSync(path.join(__dirname, 'without-art.flac'));
+        res.writeHead(200, { 'Content-Type': 'audio/flac', 'Content-Disposition': 'attachment; filename="artwork.flac"', 'Content-Length': bytes.length });
+        res.end(bytes); return;
+      }
       if (url.pathname === '/fixture.flac') {
         res.writeHead(200, { 'Content-Type': 'audio/flac', 'Content-Disposition': 'attachment; filename="song.flac"', 'Content-Length': fixture.length });
         let offset = 0;
@@ -368,7 +376,7 @@ try {
       res.end(query === 'Retry' && count === 1
         ? '<div class="alert-error">Backend unavailable</div>'
         : query === 'Other' && count === 1 ? '<a class="download-button" href="/wrong.flac">Download</a>'
-        : '<a class="download-button" href="' + (query === 'Large' ? '/large.flac' : '/fixture.flac') + '">Download</a>');
+        : '<a class="download-button" href="' + (query === 'Large' ? '/large.flac' : query === 'Artwork' ? '/without-art.flac' : '/fixture.flac') + '">Download</a>');
     });
     const deadline = setTimeout(() => { console.error('Electron smoke timed out'); app.exit(1); }, 45000);
     server.listen(0, '127.0.0.1', () => {
@@ -438,7 +446,7 @@ try {
           await new Promise(resolve => setTimeout(resolve, 150));
           await win.webContents.capturePage().then(image => fs.writeFileSync(path.join(__dirname, 'recent-profiles.png'), image.toPNG()));
           const { downloads: results, libraries } = await win.webContents.executeJavaScript(${JSON.stringify(renderer)});
-          if (new Set(results.map(result => result.savePath)).size !== 3) throw new Error('Concurrent files collided');
+          if (new Set(results.map(result => result.savePath)).size !== 4) throw new Error('Concurrent files collided');
           for (const result of results.slice(0, 2)) {
             if (!fs.readFileSync(result.savePath).equals(fixture)) throw new Error('Downloaded bytes changed');
             if (result.file !== path.basename(result.savePath)) throw new Error('Completion filename differs from actual save path');
@@ -454,6 +462,11 @@ try {
             at += 4 + len;
           }
           if (!picture) throw new Error('Artwork repair removed the cover');
+          const embedded = fs.readFileSync(results[3].savePath);
+          if (!audio(embedded).equals(audio(fixture))) throw new Error('Embedding artwork changed audio frames');
+          const { hasValidArtwork } = await import(${JSON.stringify(new URL('../src/engine/flac-artwork.mjs', import.meta.url).href)});
+          if (!await hasValidArtwork(results[3].savePath, bytes => !nativeImage.createFromBuffer(bytes).isEmpty())) throw new Error('Separate artwork was not embedded');
+          if (fs.readdirSync(path.join(__dirname, 'downloads')).some(file => file.startsWith('.lucida-'))) throw new Error('Temporary FLAC was retained');
           for (const [i, name] of ['Owner', 'Second'].entries()) {
             const dir = path.join(__dirname, 'downloads', name);
             const library = libraries[i];
@@ -481,11 +494,12 @@ try {
             'new Promise((resolve, reject) => { const until = Date.now() + 10000; const tick = () => { if (window.runUIRegression) { try { resolve(window.runUIRegression()); } catch (error) { reject(error); } } else if (Date.now() > until) reject(new Error("UI fixture did not load")); else setTimeout(tick, 25); }; tick(); })'
           );
           if (!uiRegression.recovered || uiRegression.extraExpansions) throw new Error('UI regressions failed');
+          if (!await fixtureWindow.webContents.executeJavaScript('window.runCatalogRegression()')) throw new Error('Catalog parser fixtures failed');
           fixtureWindow.destroy();
           console.log('PASS: React render recovery preserves queue; 80 progress ticks across 10001 rows caused no full-list rebuilds');
           console.log('PASS: real HTTP 429/Retry-After and 403 source observations; custom Monochrome backend validation, save and reset');
           console.log('PASS: download expansion and filter survive navigation and reload; filtered collapse preserves hidden choices; recent profiles reopen cached playlists without a search; restored source is Qobuz rather than Spotify metadata');
-          console.log('PASS: ${packaged ? 'packaged archive' : 'source'}, built UI, trusted sound-label clicks keep the shell onscreen, sound toggle, bounded volume writes, audio device failures, invalid link preview, saved preferences, real cascades, automatic retry, wrong remix rejected, three FLAC downloads, actual filenames, byte integrity, oversized artwork retained, audio frames unchanged, shared profile copies, distinct playlist folders and PNG covers, live pause/resume, disposal and clean quit');
+          console.log('PASS: ${packaged ? 'packaged archive' : 'source'}, built UI, trusted sound-label clicks keep the shell onscreen, sound toggle, bounded volume writes, audio device failures, invalid link preview, saved preferences, real cascades, automatic retry, wrong remix rejected, four FLAC downloads with embedded artwork, actual filenames, byte integrity, oversized artwork retained, audio frames unchanged, shared profile copies, distinct playlist folders and PNG covers, live pause/resume, disposal and clean quit');
           clearTimeout(deadline); server.close(); app.quit();
         } catch (error) { console.error(error.stack); clearTimeout(deadline); server.close(); app.exit(1); }
       });
@@ -496,7 +510,7 @@ try {
   const output = await run(electron, [sandbox]);
   if (!output.includes('PASS:')) throw new Error(output || 'Smoke check exited before running');
   const manifest = JSON.parse(await fs.readFile(path.join(stateRoot, 'state', 'manifest.json'), 'utf8'));
-  if (Object.keys(manifest).length !== 3) throw new Error('Quit did not flush all completed downloads to the manifest');
+  if (Object.keys(manifest).length !== 4) throw new Error('Quit did not flush all completed downloads to the manifest');
   const config = JSON.parse(await fs.readFile(path.join(stateRoot, 'state', 'config.json'), 'utf8'));
   if (config.keepTrying !== true) throw new Error('Keep trying preference did not survive quit');
   if (config.sounds !== true || config.soundVolume !== 0.7) throw new Error('Sound preferences did not survive quit');

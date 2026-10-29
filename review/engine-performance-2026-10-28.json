@@ -1,0 +1,105 @@
+{
+  "note": "Same machine; HEAD controller versus current controller with current shared dependencies. In-memory IPC restore; three workers with a 1 ms fixture delay. This does not measure live provider or disk/network throughput.",
+  "results": [
+    {
+      "count": 500,
+      "version": "baseline",
+      "restoreMs": 15.088099999999997,
+      "firstCompletionMs": 2.215599999999995,
+      "completionMs": 2454.921,
+      "cpuMicros": {
+        "user": 16000,
+        "system": 0
+      },
+      "initialMemory": {
+        "rss": 58978304,
+        "heapTotal": 10240000,
+        "heapUsed": 6012160,
+        "external": 2858097,
+        "arrayBuffers": 137593
+      },
+      "finalMemory": {
+        "rss": 62222336,
+        "heapTotal": 12075008,
+        "heapUsed": 8630464,
+        "external": 2353788,
+        "arrayBuffers": 137609
+      }
+    },
+    {
+      "count": 500,
+      "version": "current",
+      "restoreMs": 5.159099999999853,
+      "firstCompletionMs": 3.32529999999997,
+      "completionMs": 2423.8419,
+      "cpuMicros": {
+        "user": 0,
+        "system": 0
+      },
+      "initialMemory": {
+        "rss": 62570496,
+        "heapTotal": 12075008,
+        "heapUsed": 7110184,
+        "external": 2353788,
+        "arrayBuffers": 137609
+      },
+      "finalMemory": {
+        "rss": 64471040,
+        "heapTotal": 14434304,
+        "heapUsed": 8888176,
+        "external": 2353788,
+        "arrayBuffers": 137609
+      }
+    },
+    {
+      "count": 5000,
+      "version": "baseline",
+      "restoreMs": 943.3113000000003,
+      "firstCompletionMs": 8.8100000000004,
+      "completionMs": 25001.179500000002,
+      "cpuMicros": {
+        "user": 1703000,
+        "system": 187000
+      },
+      "initialMemory": {
+        "rss": 64536576,
+        "heapTotal": 13647872,
+        "heapUsed": 7271800,
+        "external": 2353788,
+        "arrayBuffers": 137609
+      },
+      "finalMemory": {
+        "rss": 66732032,
+        "heapTotal": 15740928,
+        "heapUsed": 14623096,
+        "external": 2353788,
+        "arrayBuffers": 137609
+      }
+    },
+    {
+      "count": 5000,
+      "version": "current",
+      "restoreMs": 37.06470000000263,
+      "firstCompletionMs": 3.1447000000007392,
+      "completionMs": 24919.9424,
+      "cpuMicros": {
+        "user": 360000,
+        "system": 15000
+      },
+      "initialMemory": {
+        "rss": 66736128,
+        "heapTotal": 16003072,
+        "heapUsed": 13861568,
+        "external": 2353788,
+        "arrayBuffers": 137609
+      },
+      "finalMemory": {
+        "rss": 82956288,
+        "heapTotal": 31993856,
+        "heapUsed": 17018720,
+        "external": 2353788,
+        "arrayBuffers": 137609
+      }
+    }
+  ]
+}

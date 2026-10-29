@@ -6,8 +6,9 @@ import SourceIcon from '../components/SourceIcon.jsx';
 import Icon from '../components/Icon.jsx';
 import { SERVICE_LABELS } from '../../engine/status.mjs';
 import { normalizeApiUrl } from '../../engine/source-access.mjs';
+import { API_PROVIDERS } from '../../engine/providers.mjs';
 
-const ALL_SERVICES = ['qobuz', 'tidal', 'deezer', 'amazon', 'yandex', 'monochrome'];
+const ALL_SERVICES = ['qobuz', 'tidal', 'deezer', 'amazon', 'yandex', 'monochrome', ...Object.keys(API_PROVIDERS)];
 
 export default function SettingsView({ config, setConfig, onToast, throttleOff = false }) {
   const [local, setLocal] = useState(config);
@@ -247,17 +248,19 @@ export default function SettingsView({ config, setConfig, onToast, throttleOff =
                       <button
                         key={sv}
                         className="source-chip"
+                        disabled={API_PROVIDERS[sv] && !API_PROVIDERS[sv].qualified}
                         onClick={() => toggleService(sv)}
                         aria-pressed={on}
-                        title={on ? `Tried #${idx + 1} — click to disable` : 'Click to enable'}
+                        title={API_PROVIDERS[sv]?.reason || (on ? `Tried #${idx + 1} — click to disable` : 'Click to enable')}
                       >
                         <SourceIcon service={sv} size={20} title="" />
-                        {SERVICE_LABELS[sv] || sv}
+                        {API_PROVIDERS[sv]?.label || SERVICE_LABELS[sv] || sv}
                         {on && <span className="source-rank">{idx + 1}</span>}
                       </button>
                     );
                   })}
                 </div>
+                {Object.values(API_PROVIDERS).filter(p => !p.qualified).map(p => <p key={p.label} className="setting-desc">{p.label}: {p.reason}</p>)}
               </div>
               <div className="setting-block">
                 <div className="setting-copy">
