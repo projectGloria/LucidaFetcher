@@ -37,8 +37,8 @@ const TONE = {
 // Capture the small visible-row snapshot before passing it through memo.
 export default function TrackRow(props) {
   const rec = props.rec;
-  const rowState = JSON.stringify([rec.status, rec.statusText, rec.priority, rec.attemptStartedAt,
-    rec.transferService, rec.step, rec.result, rec.item, rec.reused]);
+  const { item = {}, step, result } = rec;
+  const rowState = `${rec.status || ''}|${rec.statusText || ''}|${rec.priority ? 1 : 0}|${rec.attemptStartedAt || 0}|${rec.transferService || ''}|${step?.i || 0}/${step?.of || 0}:${step?.service || ''}|${result?.service || ''}:${result?.via || ''}:${result?.file || ''}:${result?.savePath || ''}:${result?.sourceUrl || ''}|${rec.reused ? 1 : 0}|${item.id || ''}:${item.title || ''}:${item.artist || ''}:${item.album || ''}:${item.image || ''}:${item.groupName || ''}`;
   return <MemoRow {...props} rowState={rowState} />;
 }
 const MemoRow = memo(TrackRowContent, (before, after) => before.rowState === after.rowState

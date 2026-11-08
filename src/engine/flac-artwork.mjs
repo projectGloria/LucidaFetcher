@@ -76,7 +76,8 @@ export async function embedArtwork(path, { bytes, mime = 'image/png', width, hei
       }
     };
     const copy = async (start, length) => {
-      const buffer = Buffer.alloc(256 * 1024);
+      if (length <= 0) return;
+      const buffer = Buffer.allocUnsafe(Math.min(length, 1 << 20));
       while (length > 0) {
         const { bytesRead } = await source.read(buffer, 0, Math.min(length, buffer.length), start);
         if (!bytesRead) throw new Error('Truncated FLAC');

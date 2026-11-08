@@ -40,7 +40,7 @@ export async function loadValidatedLibrary(profileDir, validateFile) {
       const extraTargets = track.playlistFiles
         ? Object.values(track.playlistFiles).map(rel => trackPath(profileDir, rel))
         : [];
-      const allTargets = [target, ...extraTargets];
+      const allTargets = [...new Set([target, ...extraTargets])];
       let valid = Boolean(target && track.bytes > 0 && allTargets.every(Boolean));
       if (valid) {
         const checks = await Promise.all(allTargets.map(t => validateFile(t, track.bytes, track)));
@@ -62,19 +62,40 @@ export async function syncProfileLibrary(profileDir, snapshot, { validateFile, s
   const previous = await loadValidatedLibrary(profileDir, validateFile);
   state.playlists = assignPlaylistFiles(state.playlists);
   const claimed = new Map();
+  const validatedPaths = new Set();
   for (const [key, track] of Object.entries(previous.tracks)) {
-    if (track.savePath) claimed.set(track.savePath.toLowerCase(), key);
+    if (track.savePath) {
+      claimed.set(track.savePath.toLowerCase(), key);
+      if (downloaded(track) && track.bytes > 0) validatedPaths.add(`${dirKey(track.savePath)}:${track.bytes}`);
+    }
     for (const rel of Object.values(track.playlistFiles || {})) {
       const full = trackPath(profileDir, rel);
-      if (full) claimed.set(full.toLowerCase(), key);
+      if (full) {
+        claimed.set(full.toLowerCase(), key);
+        if (downloaded(track) && track.bytes > 0) validatedPaths.add(`${dirKey(full)}:${track.bytes}`);
+      }
     }
   }
+  const checkFile = async (file, bytes, track) => {
+    const k = `${dirKey(file)}:${bytes}`;
+    if (validatedPaths.has(k)) return true;
+    const ok = await validateFile(file, bytes, track);
+    if (ok) validatedPaths.add(k);
+    return ok;
+  };
+  const createdDirs = new Set();
+  const ensureDir = async (dir) => {
+    const k = dirKey(dir);
+    if (createdDirs.has(k)) return;
+    await fs.mkdir(dir, { recursive: true });
+    createdDirs.add(k);
+  };
 
   const playlistsForKey = new Map();
   for (const playlist of state.playlists) {
     const plFolder = playlist.folder || playlist.file;
     const plDir = path.join(profileDir, plFolder);
-    await fs.mkdir(plDir, { recursive: true });
+    await ensureDir(plDir);
     const artUrl = playlist.artwork || state.profile?.image;
     if (artUrl) saveArtwork(artUrl, path.join(plDir, 'cover.png'));
     for (const key of playlist.trackKeys || []) {
@@ -111,7 +132,7 @@ export async function syncProfileLibrary(profileDir, snapshot, { validateFile, s
     let source = null;
     if (track.bytes > 0) {
       for (const candidate of candidates) {
-        if (candidate && await validateFile(candidate, track.bytes, track)) {
+        if (candidate && await checkFile(candidate, track.bytes, track)) {
           source = candidate;
           break;
         }
@@ -131,7 +152,7 @@ export async function syncProfileLibrary(profileDir, snapshot, { validateFile, s
     let firstTarget = null;
     for (const plFolder of targetFolders) {
       const plDir = path.join(profileDir, plFolder);
-      await fs.mkdir(plDir, { recursive: true });
+      await ensureDir(plDir);
       let target = null;
       if (inside(plDir, source)) {
         target = source;
@@ -139,24 +160,26 @@ export async function syncProfileLibrary(profileDir, snapshot, { validateFile, s
         const old = previous.tracks[key];
         const oldRel = old?.playlistFiles?.[plFolder] || (old?.file && inside(plDir, trackPath(profileDir, old.file) || '') ? old.file : null);
         const oldPath = oldRel ? trackPath(profileDir, oldRel) : null;
-        if (oldPath && old.bytes === track.bytes && await validateFile(oldPath, track.bytes, track)) {
+        if (oldPath && old.bytes === track.bytes && await checkFile(oldPath, track.bytes, track)) {
           target = oldPath;
         } else {
           const name = path.basename(source);
           const base = name.replace(/\.flac$/i, '').slice(0, 160);
-          const hash = crypto.createHash('sha256').update(key).digest('hex').slice(0, 10);
+          let hash = null;
           for (let n = 0; ; n++) {
+            if (n > 0 && !hash) hash = crypto.createHash('sha256').update(key).digest('hex').slice(0, 10);
             target = path.join(plDir, n ? `${base} [${hash}]${n > 1 ? ` (${n})` : ''}.flac` : name);
             const release = reserveCopy(target);
             if (!release) continue; // a live Chromium transfer owns this path
             try {
               // COPYFILE_EXCL never replaces the user's music or another track.
               await fs.copyFile(source, target, 1);
+              validatedPaths.add(`${dirKey(target)}:${track.bytes}`);
               break;
             } catch (error) {
               if (error.code !== 'EEXIST') throw error;
               if (n === 0 && (!claimed.has(target.toLowerCase()) || claimed.get(target.toLowerCase()) === key)
-                  && await validateFile(target, track.bytes, track)) {
+                  && await checkFile(target, track.bytes, track)) {
                 break;
               }
             } finally { release(); }

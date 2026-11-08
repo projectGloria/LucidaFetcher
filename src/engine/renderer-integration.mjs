@@ -60,9 +60,11 @@ export function startEngine(opts) {
     onWait: (itemId, step, ms, limited) => {
       const rec = controller.getItem(itemId);
       if (!rec || rec.status !== 'searching') return;
-      rec.statusText = ms == null ? 'Waiting for a source browser'
+      const nextText = ms == null ? 'Waiting for a source browser'
         : limited ? `Source rate limit — retrying in ${Math.ceil(ms / 1000)}s` : describeStep(step, rec.plan);
-      controller._emit();
+      if (rec.statusText === nextText) return;
+      rec.statusText = nextText;
+      controller._emit(rec);
     } };
 
   const makeWorker = slot => new Worker({ slot, view: lazyWorkerView(container), ipc, log, pipeline, ...accessDeps });
@@ -148,9 +150,13 @@ export function startEngine(opts) {
   // failed track that survives the app closing.
   const cleanups = [];
   const reported = new Map();
+  let lastReportedTerminalVersion = -1;
   cleanups.push(controller.subscribe(() => {
     if (controller.restoring) return;
+    if (controller._terminalVersion === lastReportedTerminalVersion) return;
+    lastReportedTerminalVersion = controller._terminalVersion;
     for (const id of reported.keys()) if (!controller.getItem(id)) reported.delete(id);
+    if (controller.stats.skipped === 0) return;
     for (const rec of controller.getItems()) {
       if (rec.status !== 'skipped' || reported.get(rec.item.id) === rec.tried) continue;
       reported.set(rec.item.id, rec.tried);
@@ -175,8 +181,38 @@ export function startEngine(opts) {
   // so retrying the missing tracks rewrites it rather than leaving the first,
   // now-wrong answer on disk.
   const profileSigs = new Map();
+  let lastProfileTerminalVersion = -1;
   cleanups.push(controller.subscribe(() => {
     if (controller.restoring) return;
+    if (controller._terminalVersion === lastProfileTerminalVersion) return;
+    lastProfileTerminalVersion = controller._terminalVersion;
+    const stats = controller.stats;
+    if (stats.active > 0 || stats.queued > 0 || stats.paused > 0) {
+      let anyProfileDone = false;
+      for (const prof of controller.profiles.values()) {
+        let total = 0, pending = 0;
+        for (const pl of controller.playlists.values()) {
+          if (pl.profileId !== prof.id) continue;
+          for (const key of pl.trackKeys || []) {
+            const t = controller.tracks.get(key);
+            if (!t) continue;
+            total++;
+            if (t.status !== 'completed' && t.status !== 'skipped') { pending++; break; }
+          }
+          if (pending > 0) break;
+        }
+        if (total > 0 && pending === 0) { anyProfileDone = true; break; }
+      }
+      if (!anyProfileDone) {
+        for (const rec of controller.items.values()) {
+          if (rec.item.profileId && (rec.status === 'completed' || rec.status === 'skipped')) {
+            anyProfileDone = true;
+            break;
+          }
+        }
+      }
+      if (!anyProfileDone && profileSigs.size === 0) return;
+    }
     const profiles = collectProfiles(controller.getItems());
     const ids = new Set(profiles.map(group => group.id));
     for (const id of profileSigs.keys()) if (!ids.has(id)) profileSigs.delete(id);
@@ -200,8 +236,11 @@ export function startEngine(opts) {
   let librarySyncTimer = null;
   const librarySignatures = new Map();
   const folderArtwork = new Map();
+  let lastArtworkVersion = -1;
   cleanups.push(controller.subscribe(() => {
     if (controller.restoring) return;
+    if (controller._artworkVersion === lastArtworkVersion) return;
+    lastArtworkVersion = controller._artworkVersion;
     for (const rec of controller.items.values()) {
       const { folderName, groupArtwork } = rec.item;
       if (!folderName || !groupArtwork || folderArtwork.get(folderName) === groupArtwork) continue;
@@ -214,26 +253,31 @@ export function startEngine(opts) {
     for (const prof of controller.profiles.values()) {
       if (!prof.folderName) continue;
       const profPlaylists = [];
+      const firstPlForKey = new Map();
       for (const pl of controller.playlists.values()) {
         if (pl.profileId === prof.id) {
           const folder = pl.folder || pl.file || String(pl.name || 'Playlist').replace(/[<>:"/\\|?*\x00-\x1f]+/g, '_').trim();
-          profPlaylists.push({
+          const entry = {
             id: pl.id,
             name: pl.name,
             artwork: pl.artwork || null,
             folder,
             file: folder,
             trackKeys: pl.trackKeys || [],
-          });
+          };
+          profPlaylists.push(entry);
+          for (const key of entry.trackKeys) {
+            if (!firstPlForKey.has(key)) firstPlForKey.set(key, entry);
+          }
         }
       }
 
       const profTracks = {};
-      const members = new Set(profPlaylists.flatMap(pl => pl.trackKeys));
-      for (const [key, track] of controller.tracks.entries()) {
-        if (members.has(key)) {
+      for (const [key, firstPl] of firstPlForKey.entries()) {
+        const track = controller.tracks.get(key);
+        if (track) {
           const ownerPl = controller.playlists.get(track.firstPlaylistId)
-            || profPlaylists.find(pl => (pl.trackKeys || []).includes(key))
+            || firstPl
             || profPlaylists[0];
           const ownerFolder = ownerPl?.folder || ownerPl?.file || 'Playlist';
           const baseFile = track.file ? String(track.file).replace(/\\/g, '/').replace(/^Tracks\/+/i, '').split('/').pop() : null;
@@ -295,8 +339,11 @@ export function startEngine(opts) {
     }
   });
 
+  let lastLibraryVersion = -1;
   cleanups.push(controller.subscribe(() => {
     if (!controller.restoring && controller.profiles?.size) {
+      if (controller._libraryVersion === lastLibraryVersion) return;
+      lastLibraryVersion = controller._libraryVersion;
       if (librarySyncTimer) return;
       librarySyncTimer = setTimeout(() => {
         librarySyncTimer = null;

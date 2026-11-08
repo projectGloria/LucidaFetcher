@@ -14,6 +14,7 @@ import { resourceCache } from '../src/engine/resource-cache.mjs';
 import { Controller } from '../src/engine/controller.mjs';
 import { createCatalogTransport } from '../src/engine/catalog-http.mjs';
 import { attachPersistence } from '../src/engine/renderer-integration.mjs';
+import { syncProfileLibrary } from '../src/engine/profile-output.mjs';
 
 test('recognizes public catalog link shapes without accepting lookalike hosts', () => {
   for (const type of ['track', 'album', 'playlist']) {
@@ -210,4 +211,51 @@ test('restoring 5000 tracks batches insertion and preserves queued versus paused
   assert.equal(controller.pool.queue.length, items.filter(item => item.status === 'queued').length);
   assert.ok(controller.pool.queue.every(item => controller.getItem(item.id).status === 'queued'));
   dispose(); controller.dispose();
+});
+
+test('targeted item updates notify only the changed row and reuse derived playlist item metadata', () => {
+  const controller = new Controller(); controller.pause();
+  controller.addProfile(
+    { id: 'prof-1', name: 'Profile', folderName: 'Profile' },
+    [{ id: 'pl-1', name: 'Playlist 1', trackKeys: ['k1', 'k2'] }],
+    { k1: { title: 'Song 1', artist: 'Artist 1' }, k2: { title: 'Song 2', artist: 'Artist 2' } }
+  );
+  const firstItems = controller.getItems();
+  let k1Calls = 0, k2Calls = 0;
+  const unsub1 = controller.subscribeItem('pl-1::k1', () => k1Calls++);
+  const unsub2 = controller.subscribeItem('pl-1::k2', () => k2Calls++);
+  const rec1 = controller.getItem('k1');
+  controller._set(rec1, 'searching', 'Asking Qobuz…');
+  assert.equal(k1Calls, 1);
+  assert.equal(k2Calls, 0);
+  const secondItems = controller.getItems();
+  assert.equal(secondItems[0].item, firstItems[0].item, 'derived playlist item object is reused across status updates');
+  assert.equal(secondItems[1].item, firstItems[1].item);
+  unsub1(); unsub2(); controller.dispose();
+});
+
+test('syncProfileLibrary validates each unique target once and creates each playlist directory once', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'lucida-profile-dedup-'));
+  try {
+    const plDir = path.join(dir, 'Favorites');
+    const target = path.join(plDir, 'Artist - Song.flac');
+    let validateCalls = 0;
+    const validateFile = async (file) => {
+      validateCalls++;
+      return file === target;
+    };
+    const state = {
+      profile: { id: 'p1', name: 'Nihil' },
+      playlists: [{ id: 'pl1', name: 'Favorites', folder: 'Favorites', trackKeys: ['k1', 'k2'] }],
+      tracks: {
+        k1: { title: 'Song', artist: 'Artist', status: 'downloaded', file: 'Favorites/Artist - Song.flac', playlistFiles: ['Favorites/Artist - Song.flac'], bytes: 100 },
+        k2: { title: 'Missing', artist: 'Artist', status: 'skipped' },
+      },
+    };
+    await writeFile(path.join(dir, '.lucida-library.json'), JSON.stringify(state));
+    await syncProfileLibrary(dir, state, { validateFile });
+    assert.equal(validateCalls, 1, 'identical primary and playlist target should only be validated once across load and sync');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

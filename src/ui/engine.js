@@ -146,10 +146,10 @@ function useEngineVersion() {
 }
 
 /** Every track the engine knows about, re-read whenever it changes. */
-export function useItems() {
+export function useItems(enabled = true) {
   const store = controller;
   const version = useEngineVersion();
-  return useMemo(() => store ? store.getItems() : [], [store, version]);
+  return useMemo(() => (enabled && store) ? store.getItems() : [], [enabled, store, version]);
 }
 
 /**
@@ -174,12 +174,13 @@ export function useStats() {
   return useMemo(() => store ? store.stats : { queued: 0, active: 0, completed: 0, skipped: 0, paused: 0, cancelled: 0, total: 0 }, [store, version]);
 }
 
-export function useQueueOrder() {
+const EMPTY_QUEUE_ORDER = { active: [], queued: [], paused: [], rest: [], all: [] };
+export function useQueueOrder(enabled = true) {
   const store = controller;
   const version = useEngineVersion();
-  return useMemo(() => (store && typeof store.getQueueOrder === 'function')
+  return useMemo(() => (enabled && store && typeof store.getQueueOrder === 'function')
     ? store.getQueueOrder()
-    : { active: [], queued: [], paused: [], rest: [], all: [] }, [store, version]);
+    : EMPTY_QUEUE_ORDER, [enabled, store, version]);
 }
 
 export function usePaused() {
@@ -192,11 +193,11 @@ export function usePaused() {
  * jump around as statuses change. Sorting by status would reorder the list
  * under the user's cursor every time a download finished.
  */
-export function useGroups() {
-  const items = useItems();
+export function useGroups(enabled = true) {
+  const items = useItems(enabled);
   // Memoized on the item list so the groups keep their identity between
   // renders that did not change the queue (a parent re-render, a toggle).
-  return useMemo(() => buildGroups(items), [items]);
+  return useMemo(() => enabled ? buildGroups(items) : [], [enabled, items]);
 }
 
 function buildGroups(items) {
@@ -231,9 +232,9 @@ function buildGroups(items) {
  * "no profile" heading - the shape is `{kind: 'profile'|'group'}` so the view
  * renders one list in queue order and does not have to stitch two together.
  */
-export function useProfileTree() {
-  const groups = useGroups();
-  return useMemo(() => buildProfileTree(groups), [groups]);
+export function useProfileTree(enabled = true) {
+  const groups = useGroups(enabled);
+  return useMemo(() => enabled ? buildProfileTree(groups) : [], [enabled, groups]);
 }
 
 function buildProfileTree(groups) {

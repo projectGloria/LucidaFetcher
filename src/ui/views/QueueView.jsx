@@ -36,11 +36,11 @@ function tally(records) {
 }
 
 export default function QueueView({ onToast, preferences = {}, onPreferencesChange, onAddMusic }) {
-  const tree = useProfileTree();
-  const stats = useStats();
-  const orderData = useQueueOrder();
   const filter = FILTERS.some(f => f.id === preferences?.filter) ? preferences.filter : 'all';
   const layoutMode = preferences?.layoutMode || 'grouped'; // 'grouped' | 'custom'
+  const tree = useProfileTree(layoutMode === 'grouped');
+  const stats = useStats();
+  const orderData = useQueueOrder(layoutMode === 'custom');
   const collapsed = new Set(Array.isArray(preferences?.collapsed) ? preferences.collapsed : []);
   // App owns these preferences and saves them in config.json, so unmounting
   // this view or restarting the portable app does not reset the queue tree.
@@ -92,6 +92,9 @@ export default function QueueView({ onToast, preferences = {}, onPreferencesChan
     all: stats.total, active: stats.queued + stats.active, paused: stats.paused || 0,
     done: stats.completed, missing: stats.skipped,
   };
+  const hasVisible = layoutMode === 'custom'
+    ? (filterCount[filter] > 0 || [orderData.active, orderData.queued, orderData.paused, orderData.rest].some(list => list?.some(r => matches(r, filter))))
+    : visible.length > 0;
 
   const collapsibleIds = [
     ...visible.filter((n) => n.kind === 'profile').map((n) => n.id),
@@ -164,7 +167,7 @@ export default function QueueView({ onToast, preferences = {}, onPreferencesChan
                 : 'Keep trying is on. Missing tracks will retry after this queue finishes.'}
             </p>
           )}
-          {!visible.length ? (
+          {!hasVisible ? (
             <EmptyState filter={filter} total={stats.total} onAddMusic={onAddMusic} onShowAll={() => save({ filter: 'all' })} />
           ) : layoutMode === 'custom' ? (
             <CustomQueuePanel orderData={orderData} filter={filter} onToast={onToast} />

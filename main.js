@@ -1032,6 +1032,29 @@ function hasEmbeddedArtwork(file) {
 // IPC stalled during long runs). An unchanged file now costs one async stat.
 const FLAC_CACHE_MAX = 20000;
 const flacValidCache = new Map(); // savePathKey -> { stamp, ok }
+const defaultIsCompleteFlacFile = isCompleteFlacFile;
+const defaultHasEmbeddedArtwork = hasEmbeddedArtwork;
+function isValidFlacSync(file, bytes = 0) {
+  const unpatched = isCompleteFlacFile === defaultIsCompleteFlacFile && hasEmbeddedArtwork === defaultHasEmbeddedArtwork;
+  if (unpatched && typeof savePathKey === 'function' && typeof fs.statSync === 'function') {
+    let st;
+    try { st = fs.statSync(file); } catch { return false; }
+    if (!st || (typeof st.isFile === 'function' && !st.isFile()) || (bytes > 0 && st.size !== bytes)) return false;
+    if (Number.isFinite(st.mtimeMs)) {
+      const key = savePathKey(file);
+      const stamp = `${st.size}:${st.mtimeMs}:${st.ctimeMs}`;
+      const hit = flacValidCache.get(key);
+      if (hit && hit.stamp === stamp) return hit.ok;
+      const ok = isCompleteFlacFile(file, bytes) && hasEmbeddedArtwork(file);
+      if (ok) {
+        flacValidCache.set(key, { stamp, ok: true });
+        while (flacValidCache.size > FLAC_CACHE_MAX) flacValidCache.delete(flacValidCache.keys().next().value);
+      }
+      return ok;
+    }
+  }
+  return isCompleteFlacFile(file, bytes) && hasEmbeddedArtwork(file);
+}
 async function validateFlacCached(file, bytes = 0) {
   let st;
   try { st = await fs.promises.stat(file); } catch { return false; }
@@ -1119,17 +1142,22 @@ function folderFor(folderName) {
   return candidate;
 }
 
-function checkDownloaded(q, names = null, scan = false) {
+function checkDownloaded(q, names = null, scan = false, pendingKeys = null) {
   if (!q) return { done: false };
   const rec = q.key ? manifest[q.key] : null;
-  const pendingPath = file => Object.values(transfers).some(t => t?.savePath && savePathKey(t.savePath) === savePathKey(file));
-  if (q.savePath && q.bytes > 0 && !pendingPath(q.savePath) && isCompleteFlacFile(q.savePath, q.bytes) && hasEmbeddedArtwork(q.savePath)) {
+  const pendingPath = file => pendingKeys
+    ? pendingKeys.has(savePathKey(file))
+    : Object.values(transfers).some(t => t?.savePath && savePathKey(t.savePath) === savePathKey(file));
+  const validFlac = (file, bytes = 0) => (typeof isValidFlacSync === 'function'
+    ? isValidFlacSync(file, bytes)
+    : (isCompleteFlacFile(file, bytes) && hasEmbeddedArtwork(file)));
+  if (q.savePath && q.bytes > 0 && !pendingPath(q.savePath) && validFlac(q.savePath, q.bytes)) {
     const service = rec?.savePath && savePathKey(rec.savePath) === savePathKey(q.savePath) ? rec.service : null;
     return { done: true, file: path.basename(q.savePath), savePath: q.savePath, bytes: q.bytes, via: 'recorded-file', service: service || null };
   }
   if (rec && rec.savePath) {
     if (pendingPath(rec.savePath)) return { done: false };
-    if (!['youtube', 'soundcloud'].includes(rec.service) && isCompleteFlacFile(rec.savePath, rec.bytes) && hasEmbeddedArtwork(rec.savePath)) return { done: true, file: rec.file, via: 'manifest', service: rec.service || null, sourceUrl: rec.sourceUrl || null, savePath: rec.savePath, bytes: rec.bytes || null };
+    if (!['youtube', 'soundcloud'].includes(rec.service) && validFlac(rec.savePath, rec.bytes)) return { done: true, file: rec.file, via: 'manifest', service: rec.service || null, sourceUrl: rec.sourceUrl || null, savePath: rec.savePath, bytes: rec.bytes || null };
     delete manifest[q.key]; // gone from disk - let it download again
     saveManifest();
   }
@@ -1140,9 +1168,9 @@ function checkDownloaded(q, names = null, scan = false) {
   if (!names) return { done: false };
   for (const candidate of names) {
     const f = candidate.file;
-    const have = candidate.tokens;
+    const haveStr = candidate.tokenStr !== undefined ? candidate.tokenStr : candidate.tokens.join(' ');
     const savePath = candidate.savePath || path.join(folderFor(q.folderName), f);
-    if (!pendingPath(savePath) && (want === have.join(' ') || reversed === have.join(' '))) {
+    if (!pendingPath(savePath) && (want === haveStr || reversed === haveStr)) {
       return { done: true, file: f, savePath, bytes: candidate.bytes || null, via: 'scan' };
     }
   }
@@ -1221,7 +1249,9 @@ function scanDownloadFolders(extraDirs = []) {
         const record = (prev && prev.stamp === stamp && typeof prev.valid === 'boolean')
           ? prev
           : await (async () => {
-            const valid = await isFlacFileAsync(file) && isCompleteFlacFile(file) && hasEmbeddedArtwork(file);
+            const valid = typeof validateFlacCached === 'function'
+              ? await validateFlacCached(file, stat.size)
+              : (await isFlacFileAsync(file) && isCompleteFlacFile(file) && hasEmbeddedArtwork(file));
             const next = valid
               ? { stamp, valid: true, identity: readFlacIdentity(file) }
               : { stamp, valid: false, identity: null };
@@ -1235,6 +1265,15 @@ function scanDownloadFolders(extraDirs = []) {
         if (!record.valid) return null;
         const identity = record.identity ? await record.identity.catch(() => null) : null;
         const cleanBase = path.parse(entry.file).name.replace(/(?:\s+\(\d+\)|\s+\[[0-9a-f]{6,10}\])+$/i, '');
+        const tokens = normTokens(cleanBase);
+        const sep = cleanBase.indexOf(' - ');
+        const fileArtist = sep > 0 ? cleanBase.slice(0, sep).trim() : '';
+        const fileTitle = sep > 0 ? cleanBase.slice(sep + 3).trim() : '';
+        const allTokens = new Set([
+          ...tokens,
+          ...(identity?.title ? normTokens(identity.title) : []),
+          ...(identity?.artist ? normTokens(identity.artist) : []),
+        ]);
         return {
           file: entry.file,
           dir: entry.dir,
@@ -1243,7 +1282,11 @@ function scanDownloadFolders(extraDirs = []) {
           key,
           bytes: stat.size,
           cleanBase,
-          tokens: normTokens(cleanBase),
+          tokens,
+          tokenStr: tokens.join(' '),
+          allTokens,
+          fileArtist,
+          fileTitle,
           identity,
         };
       }));
@@ -1286,7 +1329,8 @@ ipcMain.handle('downloads-check', async (event, list, opts) => {
   // Startup must use durable completions or interrupted-transfer records. An
   // untracked, truncated audio file cannot be proven complete by a folder scan.
   const scan = !opts?.restore && opts?.scan !== false && (opts?.scan !== undefined ? !!opts.scan : config.scanFolderForExisting !== false);
-  const results = checks.map((q) => checkDownloaded(q));
+  const pendingKeys = new Set(Object.values(transfers).filter(t => t?.savePath).map(t => savePathKey(t.savePath)));
+  const results = checks.map((q) => checkDownloaded(q, null, false, pendingKeys));
   const validateIndexes = async (indexes) => {
     for (let start = 0; start < indexes.length; start += 8) {
       const slice = indexes.slice(start, start + 8);
@@ -1320,39 +1364,35 @@ ipcMain.handle('downloads-check', async (event, list, opts) => {
   const extraDirs = [...new Set(wanted.map(i => folderFor(checks[i].folderName)))];
   const allFlacs = await folderIndex(extraDirs);
   const { compareFlacIdentity, score, isAcceptable } = await getScanEngines();
-  // Built once per call: the old per-candidate Object.values(transfers).some()
-  // re-resolved every transfer path for every file for every wanted track.
-  const pendingKeys = new Set(Object.values(transfers).filter(t => t?.savePath).map(t => savePathKey(t.savePath)));
 
   for (const i of wanted) {
     const q = checks[i];
     const targetDirKey = savePathKey(folderFor(q.folderName));
+    const qTitleTokens = normTokens(q.title);
     const inTarget = [];
     const inOther = [];
     for (const c of allFlacs) {
       // The index can be up to FOLDER_INDEX_TTL_MS old, so a path that has
       // since become a live or resumable transfer is filtered here, not there.
       if (pendingKeys.has(c.key) || liveSavePaths.has(c.key)) continue;
+      if (qTitleTokens.length > 0 && c.allTokens && !qTitleTokens.some(t => c.allTokens.has(t))) continue;
       if (c.identity && !compareFlacIdentity(c.identity, q).ok) continue;
       if (c.dirKey === targetDirKey) inTarget.push(c);
       else inOther.push(c);
     }
     const ordered = [...inTarget, ...inOther];
-    let match = checkDownloaded(q, ordered, true);
+    let match = checkDownloaded(q, ordered, true, pendingKeys);
     if (!match.done) {
       for (const c of ordered) {
-        if (c.identity && c.identity.title && c.identity.artist && compareFlacIdentity(c.identity, q).ok) {
+        if (c.identity && c.identity.title && c.identity.artist) {
           match = { done: true, file: c.file, savePath: c.savePath, bytes: c.bytes, via: 'scan' };
           break;
         }
-        const sep = c.cleanBase.indexOf(' - ');
-        if (sep > 0) {
-          const fileArtist = c.cleanBase.slice(0, sep).trim();
-          const fileTitle = c.cleanBase.slice(sep + 3).trim();
-          if (fileArtist && fileTitle && isAcceptable(score(q, fileTitle, fileArtist, c.identity?.durationSec))) {
-            match = { done: true, file: c.file, savePath: c.savePath, bytes: c.bytes, via: 'scan' };
-            break;
-          }
+        const fileArtist = c.fileArtist !== undefined ? c.fileArtist : (c.cleanBase.indexOf(' - ') > 0 ? c.cleanBase.slice(0, c.cleanBase.indexOf(' - ')).trim() : '');
+        const fileTitle = c.fileTitle !== undefined ? c.fileTitle : (c.cleanBase.indexOf(' - ') > 0 ? c.cleanBase.slice(c.cleanBase.indexOf(' - ') + 3).trim() : '');
+        if (fileArtist && fileTitle && isAcceptable(score(q, fileTitle, fileArtist, c.identity?.durationSec))) {
+          match = { done: true, file: c.file, savePath: c.savePath, bytes: c.bytes, via: 'scan' };
+          break;
         }
       }
     }
@@ -2184,15 +2224,15 @@ let trackArtworkLoader;
 async function ensureDownloadArtwork(file, context) {
   const { hasValidArtwork, embedArtwork } = await import('./src/engine/flac-artwork.mjs');
   const decode = bytes => !nativeImage.createFromBuffer(bytes).isEmpty();
-  if (!await hasValidArtwork(file, decode) && context?.trackArtworkUrl) {
-    if (!trackArtworkLoader) trackArtworkLoader = import('./src/engine/resource-cache.mjs').then(({ resourceCache }) =>
-      resourceCache(safeFetchImage, { maxEntries: 32, ttl: 300000, sizeOf: value => value.buf.length }));
-    const { buf } = await (await trackArtworkLoader)(context.trackArtworkUrl);
-    const image = nativeImage.createFromBuffer(buf);
-    if (image.isEmpty()) return false;
-    const resized = image.resize({ width: Math.min(1000, image.getSize().width) });
-    await embedArtwork(file, { bytes: resized.toPNG(), ...resized.getSize() });
-  }
+  if (await hasValidArtwork(file, decode)) return true;
+  if (!context?.trackArtworkUrl) return false;
+  if (!trackArtworkLoader) trackArtworkLoader = import('./src/engine/resource-cache.mjs').then(({ resourceCache }) =>
+    resourceCache(safeFetchImage, { maxEntries: 32, ttl: 300000, sizeOf: value => value.buf.length }));
+  const { buf } = await (await trackArtworkLoader)(context.trackArtworkUrl);
+  const image = nativeImage.createFromBuffer(buf);
+  if (image.isEmpty()) return false;
+  const resized = image.resize({ width: Math.min(1000, image.getSize().width) });
+  await embedArtwork(file, { bytes: resized.toPNG(), ...resized.getSize() });
   return hasValidArtwork(file, decode);
 }
 
@@ -2322,6 +2362,7 @@ function handleWillDownload(event, item, webContents) {
     // should still be able to pick it up.
     rememberTransfer(item, ctx, savePath);
     let lastRemembered = Date.now();
+    let lastRememberedTotal = item.getTotalBytes() || 0;
     if (ctx && ctx.resumed) {
       try { if (item.canResume()) item.resume(); } catch (e) { /* already running */ }
     }
@@ -2367,8 +2408,10 @@ function handleWillDownload(event, item, webContents) {
         const now = Date.now();
         // The resume record only has to be roughly current - it is re-read against
         // the real file size on the next launch - so this is cheap on purpose.
-        if (now - lastRemembered >= 2000) {
+        const currentTotal = item.getTotalBytes() || 0;
+        if (now - lastRemembered >= 10000 || (currentTotal > 0 && lastRememberedTotal === 0)) {
           lastRemembered = now;
+          lastRememberedTotal = currentTotal;
           rememberTransfer(item, ctx, savePath);
         }
         if (now - lastProgressSend >= 250) {
@@ -2473,7 +2516,15 @@ function handleWillDownload(event, item, webContents) {
             // the file smaller than the bytes that came down the wire. The manifest
             // used to record the wire count while the folder report re-stated the
             // file - two different numbers for one download.
-            const onDisk = (() => { try { return fs.statSync(savePath).size; } catch (e) { return bytes; } })();
+            const finalStat = (() => { try { return fs.statSync(savePath); } catch (e) { return null; } })();
+            const onDisk = finalStat && typeof finalStat.size === 'number' ? finalStat.size : bytes;
+            if (finalStat && Number.isFinite(finalStat.mtimeMs) && typeof flacValidCache !== 'undefined') {
+              flacValidCache.set(savePathKey(savePath), {
+                stamp: `${finalStat.size}:${finalStat.mtimeMs}:${finalStat.ctimeMs}`,
+                ok: true,
+              });
+              while (flacValidCache.size > FLAC_CACHE_MAX) flacValidCache.delete(flacValidCache.keys().next().value);
+            }
             completedBytes = onDisk;
             // What lets a restarted app know this track is already on disk. Keyed by
             // track rather than by filename, because only the renderer knows which

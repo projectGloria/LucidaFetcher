@@ -123,7 +123,11 @@ export class Controller {
     this.playlists = new Map(); // playlistId -> { id, name, file, trackKeys: [], profileId }
     this.profiles = new Map(); // profileId -> profileMeta
     this._listeners = new Set();
+    this._itemListeners = new Map(); // canonicalId -> Set<fn>
     this._version = 0;
+    this._terminalVersion = 0;
+    this._libraryVersion = 0;
+    this._artworkVersion = 0;
     // Byte counters move several times a second per transfer; statuses do not.
     // Progress rides its own channel so a ticking bar cannot re-render the
     // whole queue - see subscribeProgress.
@@ -155,16 +159,26 @@ export class Controller {
 
   getItemSnapshot(id) {
     const rec = this._getRecord(id);
-    return rec ? JSON.stringify([rec.status, rec.statusText, rec.priority, rec.attemptStartedAt,
-      rec.transferService, rec.step, rec.result, rec.item.image]) : '';
+    if (!rec) return '';
+    const s = rec.step;
+    const r = rec.result;
+    return `${rec.status}\0${rec.statusText || ''}\0${rec.priority ? 1 : 0}\0${rec.attemptStartedAt || 0}\0${rec.transferService || ''}\0${s ? `${s.index}:${s.source}:${s.service}:${s.query || ''}` : ''}\0${r ? `${r.outcome || ''}:${r.file || ''}:${r.savePath || ''}:${r.bytes || 0}:${r.service || ''}` : ''}\0${rec.file || ''}\0${rec.savePath || ''}\0${rec.bytes || 0}\0${rec.tried?.length || 0}\0${rec.item?.image || ''}`;
   }
 
   subscribeItem(id, fn) {
     let previous = this.getItemSnapshot(id);
-    return this.subscribe(() => {
+    const key = typeof id === 'string' && id.includes('::') ? id.split('::').pop() : id;
+    const check = () => {
       const next = this.getItemSnapshot(id);
       if (next !== previous) { previous = next; fn(); }
-    });
+    };
+    let bucket = this._itemListeners.get(key);
+    if (!bucket) { bucket = new Set(); this._itemListeners.set(key, bucket); }
+    bucket.add(check);
+    return () => {
+      bucket.delete(check);
+      if (bucket.size === 0) this._itemListeners.delete(key);
+    };
   }
 
   _getRecord(id) {
@@ -212,24 +226,35 @@ export class Controller {
       const resolvedFolderName = (pl.folderName && !/\/Playlists$/i.test(pl.folderName) && pl.folderName !== 'Playlists')
         ? pl.folderName
         : defaultPlFolder;
+      if (!pl._itemCache) pl._itemCache = new Map();
       (pl.trackKeys || []).forEach((key, index) => {
         const track = this.tracks.get(key);
         if (!track) return;
+        const itemStamp = `${track.item.image || ''}\0${pl.artwork || ''}\0${prof?.image || ''}\0${resolvedFolderName}`;
+        let cachedItem = pl._itemCache.get(key);
+        if (!cachedItem || cachedItem.stamp !== itemStamp || cachedItem.base !== track.item) {
+          cachedItem = {
+            stamp: itemStamp,
+            base: track.item,
+            value: {
+              ...track.item,
+              groupId: pl.id,
+              groupName: pl.name,
+              groupArtwork: pl.artwork || track.item.image,
+              folderName: resolvedFolderName,
+              profileId: prof?.id || pl.profileId,
+              profileName: prof?.name || prof?.user,
+              profileUser: prof?.user,
+              profileArtwork: prof?.image,
+              profileFolder: prof?.folderName,
+            },
+          };
+          pl._itemCache.set(key, cachedItem);
+        }
         derived.push({
           id: `${pl.id}::${index}::${key}`,
           trackKey: key,
-          item: {
-            ...track.item,
-            groupId: pl.id,
-            groupName: pl.name,
-            groupArtwork: pl.artwork || track.item.image,
-            folderName: resolvedFolderName,
-            profileId: prof?.id || pl.profileId,
-            profileName: prof?.name || prof?.user,
-            profileUser: prof?.user,
-            profileArtwork: prof?.image,
-            profileFolder: prof?.folderName,
-          },
+          item: cachedItem.value,
           status: track.status,
           statusText: track.statusText,
           priority: !!track.priority,
@@ -368,8 +393,7 @@ export class Controller {
 
   _countStats() {
     let queued = 0, active = 0, ready = 0, completed = 0, skipped = 0, paused = 0, cancelled = 0;
-    const allRecords = [...this.items.values(), ...this.tracks.values()];
-    for (const r of allRecords) {
+    const countOne = (r) => {
       if (r.status === COMPLETED) completed++;
       else if (r.status === SKIPPED) skipped++;
       else if (r.status === PAUSED) paused++;
@@ -377,15 +401,28 @@ export class Controller {
       else if (r.status === READY) { ready++; active++; }
       else if (r.status === SEARCHING || r.status === DOWNLOADING) active++;
       else if (r.status === QUEUED) queued++;
-    }
-    return { queued, active, ready, completed, skipped, paused, cancelled, total: allRecords.length };
+    };
+    for (const r of this.items.values()) countOne(r);
+    for (const r of this.tracks.values()) countOne(r);
+    return { queued, active, ready, completed, skipped, paused, cancelled, total: this.items.size + this.tracks.size };
   }
 
-  _emit() {
-    this._syncRetry();
+  _emit(changedRec = null) {
     this._version++;
     this._progressVersion++;
+    if (!changedRec) {
+      this._terminalVersion++;
+      this._libraryVersion++;
+      this._artworkVersion++;
+    }
+    this._syncRetry();
     this._listeners.forEach((fn) => fn());
+    if (changedRec && changedRec.item?.id != null) {
+      const bucket = this._itemListeners.get(changedRec.item.id);
+      if (bucket) bucket.forEach((fn) => fn());
+    } else {
+      for (const bucket of this._itemListeners.values()) bucket.forEach((fn) => fn());
+    }
     this._progressListeners.forEach((fn) => fn());
   }
 
@@ -412,10 +449,17 @@ export class Controller {
   }
 
   _set(rec, status, statusText) {
+    const prevStatus = rec.status;
     rec.status = status;
     if (status === COMPLETED) this._retryRound = 0;
     if (statusText !== undefined) rec.statusText = statusText;
-    this._emit();
+    if (this._isTerminal(status) || this._isTerminal(prevStatus)) {
+      this._terminalVersion++;
+      this._libraryVersion++;
+    } else if (status !== SEARCHING || prevStatus !== SEARCHING) {
+      this._libraryVersion++;
+    }
+    this._emit(rec);
   }
 
   _isTerminal(s) { return s === COMPLETED || s === SKIPPED || s === CANCELLED; }
@@ -441,7 +485,7 @@ export class Controller {
       && this.services.some(service => DOWNLOAD_SERVICES.includes(service)) && this.pool.pending === 0 && this.pool.activeCount === 0
       && this.transfers.size === 0;
     if (!idle) return false;
-    const stats = this._countStats();
+    const stats = this.stats;
     return stats.active === 0 && stats.queued === 0 && stats.skipped > 0;
   }
 
@@ -466,6 +510,7 @@ export class Controller {
     this._disposed = true;
     this.cancelAll();
     this._listeners.clear();
+    this._itemListeners.clear();
     this._progressListeners.clear();
   }
 
@@ -1340,9 +1385,7 @@ export class Controller {
     // progress event of zero is Chromium announcing a transfer it has not begun
     // - promoting on that would put every parked file back under "Downloading".
     if (received > 0 && rec.status !== DOWNLOADING) {
-      rec.status = DOWNLOADING;
-      rec.statusText = `Downloading from ${serviceLabel(rec.transferService || (rec.step && rec.step.service))}`;
-      this._emit(); // a status change is structural; everything re-renders once for it
+      this._set(rec, DOWNLOADING, `Downloading from ${serviceLabel(rec.transferService || (rec.step && rec.step.service))}`);
       return;
     }
     // Bytes alone: only the views that draw them are listening.
